@@ -1,0 +1,118 @@
+{
+  "projectType": "sdk-library",
+  "projectName": "httpz",
+  "projectDescription": "Zero-allocation HTTP/1.1 parser and serializer for OxCaml using unboxed types and stack allocation",
+  "theme": "aspen",
+  "primaryColor": "#241c24",
+  "lightColor": "#154188",
+  "darkColor": "#7c8ca4",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "installation",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/architecture",
+              "concepts/unboxed-types",
+              "concepts/zero-allocation"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/parsing-requests",
+              "guides/writing-responses",
+              "guides/chunked-encoding",
+              "guides/range-requests",
+              "guides/etags",
+              "guides/security"
+            ]
+          },
+          {
+            "group": "Static File Server",
+            "pages": [
+              "server/overview",
+              "server/configuration"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Core",
+            "pages": [
+              "api/httpz",
+              "api/parser",
+              "api/buf-read",
+              "api/buf-write"
+            ]
+          },
+          {
+            "group": "Request & Response",
+            "pages": [
+              "api/req",
+              "api/res",
+              "api/header",
+              "api/method"
+            ]
+          },
+          {
+            "group": "HTTP Features",
+            "pages": [
+              "api/chunk",
+              "api/etag",
+              "api/range",
+              "api/date"
+            ]
+          },
+          {
+            "group": "Utilities",
+            "pages": [
+              "api/span",
+              "api/header-name",
+              "api/version",
+              "api/err"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Zero heap allocations during parsing",
+    "Unboxed types (int16#, int64#, char#) for performance",
+    "Stack-allocated results using unboxed records",
+    "HTTP/1.1 support with chunked encoding, ETags, range requests",
+    "RFC 7230 security compliance and request smuggling prevention",
+    "Direct bigstring I/O for zero-copy operations",
+    "Async-based static file server included"
+  ],
+  "publicApiSurface": [
+    "Httpz.parse - Parse HTTP/1.1 requests with zero allocations",
+    "Httpz.create_buffer - Create 32KB parsing buffer",
+    "Req - Request type with method, target, headers, body info",
+    "Res - Response writing functions for status, headers, chunked encoding",
+    "Parser - Low-level parser combinators",
+    "Header - Header name/value types",
+    "Method - HTTP method enumeration (GET, POST, etc)",
+    "Chunk - Chunked transfer encoding parser",
+    "Etag - ETag parsing and comparison per RFC 7232",
+    "Range - Range request parsing and Content-Range writing per RFC 7233",
+    "Date - HTTP date formatting",
+    "Span - Offset+length references into buffers",
+    "Buf_read - Buffer reading utilities and status codes",
+    "Buf_write - Buffer writing utilities"
+  ]
+}
