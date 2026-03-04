@@ -1,0 +1,459 @@
+---
+title: Buf_write
+description: Buffer writing utilities for HTTP response generation
+---
+
+The `Buf_write` module provides low-level buffer writing primitives for HTTP response generation. It mirrors `Buf_read` which provides reading primitives. All functions write to a bigstring buffer at a given offset and return the new offset.
+
+Uses `int16#` for offsets to match `Buf_read` and enable unboxed arithmetic for performance.
+
+## Basic Writers
+
+### char
+
+```ocaml
+val char : Base_bigstring.t -> off:int16# -> char -> int16#
+```
+
+Write a single boxed character. Returns `off + 1`.
+
+<ParamField path="buf" type="Base_bigstring.t">
+  Buffer to write to
+</ParamField>
+
+<ParamField path="off" type="int16#">
+  Current offset in buffer
+</ParamField>
+
+<ParamField path="c" type="char">
+  Character to write
+</ParamField>
+
+<ResponseField name="offset" type="int16#">
+  New offset after writing (off + 1)
+</ResponseField>
+
+**Example:**
+```ocaml
+let off = Buf_write.char buf ~off ' ' in
+```
+
+### char_u
+
+```ocaml
+val char_u : Base_bigstring.t -> off:int16# -> char# -> int16#
+```
+
+Write a single unboxed character. Returns `off + 1`.
+
+<ParamField path="c" type="char#">
+  Unboxed character to write
+</ParamField>
+
+**Example:**
+```ocaml
+let off = Buf_write.char_u buf ~off '\r' in
+let off = Buf_write.char_u buf ~off '\n' in
+```
+
+### string
+
+```ocaml
+val string : Base_bigstring.t -> off:int16# -> string -> int16#
+```
+
+Write a string. Returns `off + String.length s`.
+
+<ParamField path="s" type="string">
+  String to write
+</ParamField>
+
+<ResponseField name="offset" type="int16#">
+  New offset after writing (off + string length)
+</ResponseField>
+
+**Example:**
+```ocaml
+let off = Buf_write.string buf ~off "HTTP/1.1 " in
+let off = Buf_write.string buf ~off "200 OK" in
+```
+
+### crlf
+
+```ocaml
+val crlf : Base_bigstring.t -> off:int16# -> int16#
+```
+
+Write CRLF sequence (`\r\n`). Returns `off + 2`.
+
+**Example:**
+```ocaml
+let off = Buf_write.string buf ~off "Content-Length: 42" in
+let off = Buf_write.crlf buf ~off in
+```
+
+## Integer Writers
+
+### int
+
+```ocaml
+val int : Base_bigstring.t -> off:int16# -> int -> int16#
+```
+
+Write a non-negative integer in decimal. Returns new offset.
+
+<ParamField path="n" type="int">
+  Non-negative integer to write
+</ParamField>
+
+<ResponseField name="offset" type="int16#">
+  New offset after writing the decimal representation
+</ResponseField>
+
+**Example:**
+```ocaml
+let off = Buf_write.string buf ~off "Content-Length: " in
+let off = Buf_write.int buf ~off 1024 in
+let off = Buf_write.crlf buf ~off in
+(* Writes: "Content-Length: 1024\r\n" *)
+```
+
+### int64
+
+```ocaml
+val int64 : Base_bigstring.t -> off:int16# -> int64# -> int16#
+```
+
+Write an unboxed int64 in decimal. Returns new offset.
+
+<ParamField path="n" type="int64#">
+  Unboxed int64 to write
+</ParamField>
+
+**Example:**
+```ocaml
+let content_len = I64.of_int64 file_size in
+let off = Buf_write.string buf ~off "Content-Length: " in
+let off = Buf_write.int64 buf ~off content_len in
+```
+
+### hex
+
+```ocaml
+val hex : Base_bigstring.t -> off:int16# -> int -> int16#
+```
+
+Write a non-negative integer in lowercase hexadecimal. Returns new offset.
+
+<ParamField path="n" type="int">
+  Non-negative integer to write in hex
+</ParamField>
+
+**Example:**
+```ocaml
+(* Write chunk size for chunked encoding *)
+let chunk_size = 256 in
+let off = Buf_write.hex buf ~off chunk_size in
+let off = Buf_write.crlf buf ~off in
+(* Writes: "100\r\n" *)
+```
+
+## Fixed-Width Writers
+
+### digit2
+
+```ocaml
+val digit2 : Base_bigstring.t -> off:int16# -> int -> int16#
+```
+
+Write a 2-digit decimal number (zero-padded). Returns `off + 2`.
+
+<ParamField path="n" type="int">
+  Integer 0-99 to write
+</ParamField>
+
+**Example:**
+```ocaml
+(* Write date component: "05" *)
+let off = Buf_write.digit2 buf ~off 5 in
+(* Writes: "05" *)
+```
+
+### digit4
+
+```ocaml
+val digit4 : Base_bigstring.t -> off:int16# -> int -> int16#
+```
+
+Write a 4-digit decimal number (zero-padded). Returns `off + 4`.
+
+<ParamField path="n" type="int">
+  Integer 0-9999 to write
+</ParamField>
+
+**Example:**
+```ocaml
+(* Write year: "2026" *)
+let off = Buf_write.digit4 buf ~off 2026 in
+```
+
+## Type Conversions
+
+### i16
+
+```ocaml
+val i16 : int -> int16#
+```
+
+Convert int to int16#.
+
+**Example:**
+```ocaml
+let off = i16 0 in
+let off = Buf_write.string buf ~off "HTTP/1.1" in
+```
+
+### to_int
+
+```ocaml
+val to_int : int16# -> int
+```
+
+Convert int16# to int.
+
+**Example:**
+```ocaml
+let off = (* ... write response ... *) in
+let len = Buf_write.to_int off in
+Unix.write fd buf 0 len
+```
+
+## Usage Examples
+
+### Basic HTTP Response
+
+```ocaml
+let write_response buf ~off status body =
+  (* Status line *)
+  let off = Buf_write.string buf ~off "HTTP/1.1 " in
+  let off = Buf_write.int buf ~off status in
+  let off = Buf_write.char buf ~off ' ' in
+  let off = Buf_write.string buf ~off "OK" in
+  let off = Buf_write.crlf buf ~off in
+  
+  (* Headers *)
+  let off = Buf_write.string buf ~off "Content-Type: text/plain" in
+  let off = Buf_write.crlf buf ~off in
+  
+  let off = Buf_write.string buf ~off "Content-Length: " in
+  let off = Buf_write.int buf ~off (String.length body) in
+  let off = Buf_write.crlf buf ~off in
+  
+  let off = Buf_write.string buf ~off "Connection: keep-alive" in
+  let off = Buf_write.crlf buf ~off in
+  
+  (* End headers *)
+  let off = Buf_write.crlf buf ~off in
+  
+  off
+```
+
+### Response with Date Header
+
+```ocaml
+let write_response_with_date buf ~off ~date =
+  let off = Buf_write.string buf ~off "HTTP/1.1 200 OK" in
+  let off = Buf_write.crlf buf ~off in
+  
+  (* Date: Wed, 04 Mar 2026 10:30:00 GMT *)
+  let off = Buf_write.string buf ~off "Date: " in
+  let off = Buf_write.string buf ~off (day_of_week date) in
+  let off = Buf_write.string buf ~off ", " in
+  let off = Buf_write.digit2 buf ~off (day date) in
+  let off = Buf_write.char buf ~off ' ' in
+  let off = Buf_write.string buf ~off (month date) in
+  let off = Buf_write.char buf ~off ' ' in
+  let off = Buf_write.digit4 buf ~off (year date) in
+  let off = Buf_write.char buf ~off ' ' in
+  let off = Buf_write.digit2 buf ~off (hour date) in
+  let off = Buf_write.char buf ~off ':' in
+  let off = Buf_write.digit2 buf ~off (minute date) in
+  let off = Buf_write.char buf ~off ':' in
+  let off = Buf_write.digit2 buf ~off (second date) in
+  let off = Buf_write.string buf ~off " GMT" in
+  let off = Buf_write.crlf buf ~off in
+  
+  off
+```
+
+### Chunked Transfer Encoding
+
+```ocaml
+let write_chunk buf ~off chunk_data =
+  (* Write chunk size in hex *)
+  let chunk_len = String.length chunk_data in
+  let off = Buf_write.hex buf ~off chunk_len in
+  let off = Buf_write.crlf buf ~off in
+  
+  (* Write chunk data *)
+  let off = Buf_write.string buf ~off chunk_data in
+  let off = Buf_write.crlf buf ~off in
+  
+  off
+
+let write_last_chunk buf ~off =
+  (* Write "0\r\n\r\n" *)
+  let off = Buf_write.char buf ~off '0' in
+  let off = Buf_write.crlf buf ~off in
+  let off = Buf_write.crlf buf ~off in
+  off
+```
+
+### Complete Server Example
+
+```ocaml
+open Httpz
+
+let handle_request buf req headers =
+  let response_buf = Bigarray.Array1.create 
+    Bigarray.char Bigarray.c_layout 65536 
+  in
+  
+  let off = i16 0 in
+  
+  (* Status line *)
+  let off = Buf_write.string response_buf ~off "HTTP/1.1 200 OK" in
+  let off = Buf_write.crlf response_buf ~off in
+  
+  (* Server header *)
+  let off = Buf_write.string response_buf ~off "Server: httpz/0.1" in
+  let off = Buf_write.crlf response_buf ~off in
+  
+  (* Content-Type *)
+  let off = Buf_write.string response_buf ~off 
+    "Content-Type: application/json" 
+  in
+  let off = Buf_write.crlf response_buf ~off in
+  
+  (* Body *)
+  let body = {|{"status":"ok"}|} in
+  let off = Buf_write.string response_buf ~off "Content-Length: " in
+  let off = Buf_write.int response_buf ~off (String.length body) in
+  let off = Buf_write.crlf response_buf ~off in
+  
+  (* Connection *)
+  let off = Buf_write.string response_buf ~off "Connection: " in
+  let off = if req.#keep_alive then
+    Buf_write.string response_buf ~off "keep-alive"
+  else
+    Buf_write.string response_buf ~off "close"
+  in
+  let off = Buf_write.crlf response_buf ~off in
+  
+  (* End headers *)
+  let off = Buf_write.crlf response_buf ~off in
+  
+  (* Write body *)
+  let off = Buf_write.string response_buf ~off body in
+  
+  (* Send response *)
+  let len = Buf_write.to_int off in
+  Unix.write fd response_buf 0 len
+```
+
+### Error Response
+
+```ocaml
+let write_error_response buf ~off status_code message =
+  (* Status line *)
+  let off = Buf_write.string buf ~off "HTTP/1.1 " in
+  let off = Buf_write.int buf ~off status_code in
+  let off = Buf_write.char buf ~off ' ' in
+  let status_text = match status_code with
+    | 400 -> "Bad Request"
+    | 404 -> "Not Found"
+    | 413 -> "Payload Too Large"
+    | 500 -> "Internal Server Error"
+    | _ -> "Error"
+  in
+  let off = Buf_write.string buf ~off status_text in
+  let off = Buf_write.crlf buf ~off in
+  
+  (* Headers *)
+  let off = Buf_write.string buf ~off "Content-Type: text/plain" in
+  let off = Buf_write.crlf buf ~off in
+  
+  let off = Buf_write.string buf ~off "Content-Length: " in
+  let off = Buf_write.int buf ~off (String.length message) in
+  let off = Buf_write.crlf buf ~off in
+  
+  let off = Buf_write.string buf ~off "Connection: close" in
+  let off = Buf_write.crlf buf ~off in
+  
+  let off = Buf_write.crlf buf ~off in
+  
+  (* Body *)
+  let off = Buf_write.string buf ~off message in
+  
+  off
+```
+
+## Performance Characteristics
+
+- **Zero allocation** - All writes are in-place to the buffer
+- **Unboxed arithmetic** - Uses `int16#` to avoid boxing
+- **Predictable performance** - No hidden allocations or copies
+- **Cache-friendly** - Sequential writes to contiguous memory
+- **Branchless digit writing** - `digit2` and `digit4` use optimized implementations
+
+## Common Patterns
+
+### Threading Offset
+
+Always thread the offset through your writes:
+
+```ocaml
+let off = i16 0 in
+let off = Buf_write.string buf ~off "Line 1" in
+let off = Buf_write.crlf buf ~off in
+let off = Buf_write.string buf ~off "Line 2" in
+let off = Buf_write.crlf buf ~off in
+Buf_write.to_int off  (* Final length *)
+```
+
+### Header Writing Helper
+
+```ocaml
+let write_header buf ~off name value =
+  let off = Buf_write.string buf ~off name in
+  let off = Buf_write.string buf ~off ": " in
+  let off = Buf_write.string buf ~off value in
+  let off = Buf_write.crlf buf ~off in
+  off
+
+(* Usage *)
+let off = write_header buf ~off "Content-Type" "text/html" in
+let off = write_header buf ~off "Server" "httpz" in
+```
+
+### Buffer Size Estimation
+
+Ensure your buffer is large enough:
+
+```ocaml
+(* Estimate: status line + headers + body *)
+let estimate_response_size ~headers ~body_len =
+  let status_line = 15 in  (* "HTTP/1.1 200 OK\r\n" *)
+  let header_overhead = List.length headers * 4 in  (* ": " + "\r\n" *)
+  let header_content = List.fold_left (fun acc (k, v) ->
+    acc + String.length k + String.length v
+  ) 0 headers in
+  let end_headers = 2 in  (* "\r\n" *)
+  status_line + header_overhead + header_content + end_headers + body_len
+
+let response_size = estimate_response_size ~headers ~body_len in
+let buf = Bigarray.Array1.create 
+  Bigarray.char Bigarray.c_layout response_size
+in
+(* ... write response ... *)
+```

@@ -1,0 +1,600 @@
+---
+title: Range
+description: Byte range request parsing and Content-Range response generation per RFC 7233
+---
+
+The `Range` module provides zero-allocation parsing for HTTP byte range requests and helpers for generating partial content responses per [RFC 7233](https://datatracker.ietf.org/doc/html/rfc7233).
+
+## Overview
+
+Range requests allow clients to request specific portions of a resource, enabling:
+- **Resume downloads** - request remaining bytes after connection failure
+- **Partial content** - request specific segments (e.g., video seeking)
+- **Multi-part ranges** - request multiple non-contiguous ranges
+
+The module supports parsing `Range` headers and generating appropriate `Content-Range` and `Accept-Ranges` response headers.
+
+## Types
+
+### Byte Range
+
+<ResponseField name="byte_range" type="private unboxed record">
+  Unboxed byte range specification. Use query functions to inspect the kind.
+  
+  <ResponseField name="kind" type="int">
+    Internal kind indicator (use query functions instead of accessing directly)
+  </ResponseField>
+  
+  <ResponseField name="start" type="int64#">
+    Start position or suffix length (interpretation depends on kind)
+  </ResponseField>
+  
+  <ResponseField name="end_" type="int64#">
+    End position (only valid for standard ranges)
+  </ResponseField>
+</ResponseField>
+
+**Range kinds:**
+- **Standard range**: `bytes=0-499` - explicit start and end positions
+- **Suffix range**: `bytes=-500` - last N bytes (N stored in `start`)
+- **Open range**: `bytes=9500-` - from start to end of file
+
+### Resolved Range
+
+<ResponseField name="resolved" type="unboxed record">
+  Resolved byte range with concrete positions after evaluation.
+  
+  <ResponseField name="start" type="int64#">
+    First byte position (0-indexed)
+  </ResponseField>
+  
+  <ResponseField name="end_" type="int64#">
+    Last byte position (inclusive)
+  </ResponseField>
+  
+  <ResponseField name="length" type="int64#">
+    Number of bytes: `end_ - start + 1`
+  </ResponseField>
+</ResponseField>
+
+### Parse Status
+
+<ResponseField name="parse_status" type="variant">
+  Result status from range parsing.
+  
+  <ResponseField name="Valid">
+    Successfully parsed one or more ranges
+  </ResponseField>
+  
+  <ResponseField name="Invalid">
+    Invalid range syntax or unsupported unit
+  </ResponseField>
+</ResponseField>
+
+### Evaluation Result
+
+<ResponseField name="eval_result" type="variant">
+  Result of evaluating ranges against resource length.
+  
+  <ResponseField name="Full_content">
+    Serve full content (200 OK)
+  </ResponseField>
+  
+  <ResponseField name="Single_range">
+    Single satisfiable range (206 Partial Content)
+  </ResponseField>
+  
+  <ResponseField name="Multiple_ranges">
+    Multiple satisfiable ranges (206 with multipart/byteranges)
+  </ResponseField>
+  
+  <ResponseField name="Not_satisfiable">
+    No satisfiable ranges (416 Range Not Satisfiable)
+  </ResponseField>
+</ResponseField>
+
+## Constants
+
+<ResponseField name="max_ranges" type="int16#" default="16">
+  Maximum number of ranges that can be parsed from a single `Range` header.
+</ResponseField>
+
+<ResponseField name="empty" type="byte_range">
+  Empty byte range constant for array initialization.
+</ResponseField>
+
+<ResponseField name="empty_resolved" type="resolved">
+  Empty resolved range constant.
+</ResponseField>
+
+## Range Query Functions
+
+### is_range
+
+```ocaml
+val is_range : byte_range -> bool
+```
+
+Returns `true` if this is a standard range with explicit start and end.
+
+**Example:** `bytes=0-499` - access via `r.#start` and `r.#end_`
+
+### is_suffix
+
+```ocaml
+val is_suffix : byte_range -> bool
+```
+
+Returns `true` if this is a suffix range (last N bytes).
+
+**Example:** `bytes=-500` - suffix length stored in `r.#start`
+
+### is_open
+
+```ocaml
+val is_open : byte_range -> bool
+```
+
+Returns `true` if this is an open-ended range (start to EOF).
+
+**Example:** `bytes=9500-` - access start via `r.#start`
+
+## Parsing Functions
+
+### parse
+
+```ocaml
+val parse
+  :  local_ Base_bigstring.t
+  -> Span.t
+  -> byte_range array
+  -> #(parse_status * int16#)
+```
+
+Parse `Range` header value into array of byte ranges. Only supports `bytes` unit.
+
+<ParamField path="buf" type="Base_bigstring.t" required>
+  Buffer containing the Range header value (marked as local)
+</ParamField>
+
+<ParamField path="span" type="Span.t" required>
+  Span indicating the header value location
+</ParamField>
+
+<ParamField path="ranges" type="byte_range array" required>
+  Pre-allocated array to store parsed ranges (minimum size: `max_ranges`)
+</ParamField>
+
+**Returns:** Unboxed tuple `#(parse_status * int16#)` where:
+- First value is parse status
+- Second value is count of ranges parsed (only valid if status is `Valid`)
+
+**Supported formats:**
+- Single range: `bytes=0-499` (first 500 bytes)
+- Single range: `bytes=500-999` (bytes 500-999)
+- Suffix range: `bytes=-500` (last 500 bytes)
+- Open range: `bytes=9500-` (byte 9500 to end)
+- Multiple ranges: `bytes=0-0,-1` (first and last byte)
+
+**Example:**
+
+```ocaml
+let range_header = Req.find_header req Header_name.Range in
+match range_header with
+| Some span ->
+  let ranges = Array.make (to_int Range.max_ranges) Range.empty in
+  let #(status, count) = Range.parse (Req.buf req) span ranges in
+  (match status with
+  | Range.Valid ->
+    (* Successfully parsed ranges *)
+    handle_range_request ranges count
+  | Range.Invalid ->
+    (* Invalid Range header - serve full content *)
+    serve_full_content ())
+| None ->
+  serve_full_content ()
+```
+
+### parse_string
+
+```ocaml
+val parse_string : string -> byte_range array -> #(parse_status * int16#)
+```
+
+Parse `Range` header from a string. Creates a local buffer internally. More ergonomic when you have the header value as a string.
+
+<ParamField path="value" type="string" required>
+  Range header value as string
+</ParamField>
+
+<ParamField path="ranges" type="byte_range array" required>
+  Pre-allocated array to store parsed ranges
+</ParamField>
+
+**Returns:** Unboxed tuple `#(parse_status * int16#)` with status and count.
+
+**Example:**
+
+```ocaml
+let ranges = Array.make (to_int Range.max_ranges) Range.empty in
+let #(status, count) = Range.parse_string "bytes=0-499" ranges in
+match status with
+| Range.Valid ->
+  Printf.printf "Parsed %d range(s)\n" (to_int count)
+| Range.Invalid ->
+  Printf.printf "Invalid range\n"
+```
+
+## Range Resolution
+
+### evaluate
+
+```ocaml
+val evaluate
+  :  byte_range array
+  -> count:int16#
+  -> resource_length:int64#
+  -> resolved array
+  -> #(eval_result * int16#)
+```
+
+Resolve and evaluate byte ranges against resource length. Determines the appropriate response type.
+
+<ParamField path="ranges" type="byte_range array" required>
+  Array of parsed ranges (from `parse`)
+</ParamField>
+
+<ParamField path="count" type="int16#" required>
+  Number of valid ranges in array (from `parse`)
+</ParamField>
+
+<ParamField path="resource_length" type="int64#" required>
+  Total length of the resource in bytes
+</ParamField>
+
+<ParamField path="out" type="resolved array" required>
+  Pre-allocated array to store resolved ranges (same size as `ranges`)
+</ParamField>
+
+**Returns:** Unboxed tuple `#(eval_result * int16#)` where:
+- First value indicates how to respond
+- Second value is count of resolved ranges written to `out`
+
+**Example:**
+
+```ocaml
+let file_size = i64 (Int64.of_int (Unix.stat filename).st_size) in
+let resolved = Array.make (to_int Range.max_ranges) Range.empty_resolved in
+let #(result, resolved_count) = Range.evaluate ranges ~count ~resource_length:file_size resolved in
+
+match result with
+| Range.Full_content ->
+  (* No valid ranges - serve full 200 response *)
+  send_200_response file_size
+
+| Range.Single_range ->
+  (* One range - send 206 with Content-Range *)
+  let r = Array.get resolved 0 in
+  let off = Res.write_status_line buf ~off 206 in
+  let off = Range.write_content_range_resolved buf ~off r ~total:file_size in
+  let off = Res.write_content_length buf ~off r.#length in
+  send_partial_content r
+
+| Range.Multiple_ranges ->
+  (* Multiple ranges - send 206 with multipart/byteranges *)
+  send_multipart_response resolved resolved_count file_size
+
+| Range.Not_satisfiable ->
+  (* Send 416 Range Not Satisfiable *)
+  let off = Res.write_status_line buf ~off 416 in
+  let off = Range.write_content_range_unsatisfiable buf ~off ~total:file_size in
+  send_error_response ()
+```
+
+### resolve_range
+
+```ocaml
+val resolve_range
+  :  byte_range
+  -> resource_length:int64#
+  -> #(bool * resolved)
+```
+
+Resolve a single byte range against resource length.
+
+<ParamField path="range" type="byte_range" required>
+  Byte range to resolve
+</ParamField>
+
+<ParamField path="resource_length" type="int64#" required>
+  Total length of the resource
+</ParamField>
+
+**Returns:** Unboxed tuple `#(bool * resolved)` where:
+- First value is `true` if range is satisfiable
+- Second value contains resolved range (only valid if first is `true`)
+
+**Example:**
+
+```ocaml
+let range = Array.get ranges 0 in
+let #(valid, resolved) = Range.resolve_range range ~resource_length:file_size in
+if valid then
+  Printf.printf "Range: bytes %Ld-%Ld/%Ld\n" 
+    (to_i64 resolved.#start)
+    (to_i64 resolved.#end_)
+    (to_i64 file_size)
+else
+  Printf.printf "Range not satisfiable\n"
+```
+
+## Response Writing
+
+### write_accept_ranges
+
+```ocaml
+val write_accept_ranges : Base_bigstring.t -> off:int16# -> int16#
+```
+
+Write `Accept-Ranges: bytes\r\n` header to indicate range support.
+
+<ParamField path="buf" type="Base_bigstring.t" required>
+  Destination buffer
+</ParamField>
+
+<ParamField path="off" type="int16#" required>
+  Current offset
+</ParamField>
+
+**Returns:** New offset after writing.
+
+**Example:**
+
+```ocaml
+let off = Res.write_status_line buf ~off 200 in
+let off = Range.write_accept_ranges buf ~off in
+let off = Res.write_content_length buf ~off content_length in
+(* ... *)
+```
+
+### write_accept_ranges_none
+
+```ocaml
+val write_accept_ranges_none : Base_bigstring.t -> off:int16# -> int16#
+```
+
+Write `Accept-Ranges: none\r\n` header to indicate no range support.
+
+### write_content_range
+
+```ocaml
+val write_content_range
+  :  Base_bigstring.t
+  -> off:int16#
+  -> start:int64#
+  -> end_:int64#
+  -> total:int64#
+  -> int16#
+```
+
+Write `Content-Range: bytes start-end/total\r\n` header for 206 responses.
+
+<ParamField path="buf" type="Base_bigstring.t" required>
+  Destination buffer
+</ParamField>
+
+<ParamField path="off" type="int16#" required>
+  Current offset
+</ParamField>
+
+<ParamField path="start" type="int64#" required>
+  First byte position (0-indexed)
+</ParamField>
+
+<ParamField path="end_" type="int64#" required>
+  Last byte position (inclusive)
+</ParamField>
+
+<ParamField path="total" type="int64#" required>
+  Total resource size
+</ParamField>
+
+**Returns:** New offset after writing.
+
+**Example output:** `Content-Range: bytes 200-999/5000\r\n`
+
+### write_content_range_resolved
+
+```ocaml
+val write_content_range_resolved
+  :  Base_bigstring.t
+  -> off:int16#
+  -> resolved
+  -> total:int64#
+  -> int16#
+```
+
+Write `Content-Range` header from resolved range structure.
+
+<ParamField path="buf" type="Base_bigstring.t" required>
+  Destination buffer
+</ParamField>
+
+<ParamField path="off" type="int16#" required>
+  Current offset
+</ParamField>
+
+<ParamField path="resolved" type="resolved" required>
+  Resolved range (from `evaluate` or `resolve_range`)
+</ParamField>
+
+<ParamField path="total" type="int64#" required>
+  Total resource size
+</ParamField>
+
+**Returns:** New offset after writing.
+
+**Example:**
+
+```ocaml
+let off = Res.write_status_line buf ~off 206 in
+let off = Range.write_content_range_resolved buf ~off resolved ~total:file_size in
+let off = Res.write_content_length buf ~off resolved.#length in
+```
+
+### write_content_range_unsatisfiable
+
+```ocaml
+val write_content_range_unsatisfiable
+  :  Base_bigstring.t
+  -> off:int16#
+  -> total:int64#
+  -> int16#
+```
+
+Write `Content-Range: bytes */total\r\n` header for 416 responses.
+
+<ParamField path="buf" type="Base_bigstring.t" required>
+  Destination buffer
+</ParamField>
+
+<ParamField path="off" type="int16#" required>
+  Current offset
+</ParamField>
+
+<ParamField path="total" type="int64#" required>
+  Total resource size
+</ParamField>
+
+**Returns:** New offset after writing.
+
+**Example:**
+
+```ocaml
+let off = Res.write_status_line buf ~off 416 in
+let off = Range.write_content_range_unsatisfiable buf ~off ~total:file_size in
+let off = Res.crlf buf ~off in
+```
+
+## Multipart Range Helpers
+
+### write_multipart_boundary
+
+```ocaml
+val write_multipart_boundary : Base_bigstring.t -> off:int16# -> boundary:string -> int16#
+```
+
+Write multipart boundary line: `--boundary\r\n`
+
+<ParamField path="buf" type="Base_bigstring.t" required>
+  Destination buffer
+</ParamField>
+
+<ParamField path="off" type="int16#" required>
+  Current offset
+</ParamField>
+
+<ParamField path="boundary" type="string" required>
+  Boundary string (without `--` prefix)
+</ParamField>
+
+**Returns:** New offset after writing.
+
+### write_multipart_final
+
+```ocaml
+val write_multipart_final : Base_bigstring.t -> off:int16# -> boundary:string -> int16#
+```
+
+Write final multipart boundary: `--boundary--\r\n`
+
+### generate_boundary
+
+```ocaml
+val generate_boundary : unit -> string
+```
+
+Generate a random boundary string suitable for multipart responses.
+
+**Returns:** 24-character random alphanumeric string.
+
+**Example:**
+
+```ocaml
+let boundary = Range.generate_boundary () in
+let content_type = Printf.sprintf "multipart/byteranges; boundary=%s" boundary in
+let off = Res.write_status_line buf ~off 206 in
+let off = Res.write_header_string buf ~off "Content-Type" content_type in
+let off = Res.crlf buf ~off in
+
+(* Write each range *)
+for i = 0 to to_int resolved_count - 1 do
+  let r = Array.get resolved i in
+  let off = Range.write_multipart_boundary buf ~off ~boundary in
+  let off = Res.write_header_string buf ~off "Content-Type" "application/octet-stream" in
+  let off = Range.write_content_range_resolved buf ~off r ~total:file_size in
+  let off = Res.crlf buf ~off in
+  let off = write_range_data buf ~off r in
+  off
+done;
+let off = Range.write_multipart_final buf ~off ~boundary in
+```
+
+## Complete Example: Range Request Handler
+
+```ocaml
+let handle_range_request req filename =
+  let file_size = i64 (Int64.of_int (Unix.stat filename).st_size) in
+  
+  match Req.find_header req Header_name.Range with
+  | None ->
+    (* No Range header - serve full content *)
+    let off = Res.write_status_line buf ~off:(i16 0) 200 in
+    let off = Range.write_accept_ranges buf ~off in
+    let off = Res.write_content_length buf ~off file_size in
+    let off = Res.crlf buf ~off in
+    let off = write_full_file buf ~off filename in
+    send_response ~len:off
+  
+  | Some span ->
+    (* Parse Range header *)
+    let ranges = Array.make (to_int Range.max_ranges) Range.empty in
+    let #(parse_status, count) = Range.parse (Req.buf req) span ranges in
+    
+    match parse_status with
+    | Range.Invalid ->
+      (* Invalid range - serve full content *)
+      serve_full_content filename file_size
+    
+    | Range.Valid ->
+      (* Evaluate ranges against file size *)
+      let resolved = Array.make (to_int Range.max_ranges) Range.empty_resolved in
+      let #(result, resolved_count) = 
+        Range.evaluate ranges ~count ~resource_length:file_size resolved in
+      
+      match result with
+      | Range.Not_satisfiable ->
+        (* Send 416 Range Not Satisfiable *)
+        let off = Res.write_status_line buf ~off:(i16 0) 416 in
+        let off = Range.write_content_range_unsatisfiable buf ~off ~total:file_size in
+        let off = Res.crlf buf ~off in
+        send_response ~len:off
+      
+      | Range.Single_range ->
+        (* Send 206 Partial Content *)
+        let r = Array.get resolved 0 in
+        let off = Res.write_status_line buf ~off:(i16 0) 206 in
+        let off = Range.write_content_range_resolved buf ~off r ~total:file_size in
+        let off = Res.write_content_length buf ~off r.#length in
+        let off = Res.crlf buf ~off in
+        let off = write_file_range buf ~off filename r in
+        send_response ~len:off
+      
+      | Range.Multiple_ranges ->
+        (* Send 206 with multipart/byteranges *)
+        send_multipart_ranges filename file_size resolved resolved_count
+      
+      | Range.Full_content ->
+        (* No valid ranges - serve full content *)
+        serve_full_content filename file_size
+```

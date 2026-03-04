@@ -1,0 +1,510 @@
+---
+title: Parser
+description: Stack-allocated parser combinators for HTTP/1.1 parsing
+---
+
+The `Parser` module provides zero-allocation parser combinators for HTTP/1.1 parsing. Position is threaded explicitly through all combinators to avoid allocation. All combinators raise `Parse_error` on failure.
+
+## Types
+
+### pstate
+
+```ocaml
+type pstate = #{ buf : Base_bigstring.t; len : int16# }
+```
+
+Parser state - unboxed record holding buffer and length. Position is threaded explicitly through functions as a separate parameter.
+
+<ResponseField name="buf" type="Base_bigstring.t">
+  The buffer containing data to parse
+</ResponseField>
+
+<ResponseField name="len" type="int16#">
+  Length of valid data in the buffer
+</ResponseField>
+
+### Parse_error
+
+```ocaml
+exception Parse_error of Buf_read.status
+```
+
+Parse error exception with detailed status. Alias for `Err.Parse_error`.
+
+## Core Functions
+
+### make
+
+```ocaml
+val make : Base_bigstring.t -> len:int16# -> pstate
+```
+
+Create parser state from buffer and length.
+
+<ParamField path="buf" type="Base_bigstring.t">
+  The buffer to parse
+</ParamField>
+
+<ParamField path="len" type="int16#">
+  Number of valid bytes in buffer
+</ParamField>
+
+**Example:**
+```ocaml
+let pst = Parser.make buf ~len:(i16 1024) in
+(* Now use combinators *)
+```
+
+### remaining
+
+```ocaml
+val remaining : pstate -> pos:int16# -> int16#
+```
+
+Get number of remaining bytes at current position.
+
+<ParamField path="pstate" type="pstate">
+  Parser state
+</ParamField>
+
+<ParamField path="pos" type="int16#">
+  Current position
+</ParamField>
+
+<ResponseField name="remaining" type="int16#">
+  Number of bytes from pos to end of buffer
+</ResponseField>
+
+### at_end
+
+```ocaml
+val at_end : pstate -> pos:int16# -> bool
+```
+
+Check if at end of buffer (no remaining bytes).
+
+<ParamField path="pstate" type="pstate">
+  Parser state
+</ParamField>
+
+<ParamField path="pos" type="int16#">
+  Current position
+</ParamField>
+
+## Basic Combinators
+
+All combinators take `~pos` parameter and return new position.
+
+### peek_char
+
+```ocaml
+val peek_char : pstate -> pos:int16# -> char#
+```
+
+Peek current character without advancing position. Raises `Parse_error` with `Partial` status if at end.
+
+**Example:**
+```ocaml
+let c = Parser.peek_char pst ~pos in
+if c =. '\r' then (* handle CR *)
+```
+
+### peek_at
+
+```ocaml
+val peek_at : pstate -> pos:int16# -> int16# -> char#
+```
+
+Peek character at offset from current position. Raises `Parse_error` with `Partial` if out of bounds.
+
+<ParamField path="offset" type="int16#">
+  Offset from current position
+</ParamField>
+
+### char
+
+```ocaml
+val char : char# -> pstate -> pos:int16# -> int16#
+```
+
+Match single character, return new position. Raises `Parse_error` with `Partial` if at end or `Malformed` if character doesn't match.
+
+<ParamField path="expected" type="char#">
+  Character to match
+</ParamField>
+
+**Example:**
+```ocaml
+let pos = Parser.char ' ' pst ~pos in (* Match space *)
+```
+
+### string
+
+```ocaml
+val string : string -> pstate -> pos:int16# -> int16#
+```
+
+Match literal string, return new position. Raises `Parse_error` with `Partial` or `Malformed`.
+
+<ParamField path="expected" type="string">
+  String to match
+</ParamField>
+
+**Example:**
+```ocaml
+let pos = Parser.string "HTTP/" pst ~pos in
+```
+
+### take_while
+
+```ocaml
+val take_while : 
+  (char# -> bool) -> 
+  pstate -> 
+  pos:int16# -> 
+  #(Span.t * int16#)
+```
+
+Take characters while predicate holds, return span and new position. Returns empty span if predicate fails immediately.
+
+<ParamField path="predicate" type="char# -> bool">
+  Predicate function to test each character
+</ParamField>
+
+<ResponseField name="span" type="Span.t">
+  Span covering matched characters
+</ResponseField>
+
+<ResponseField name="pos" type="int16#">
+  New position after matched characters
+</ResponseField>
+
+**Example:**
+```ocaml
+let #(digits, pos) = Parser.take_while is_digit pst ~pos in
+let value = Span.parse_int64 pst.#buf digits in
+```
+
+### skip_while
+
+```ocaml
+val skip_while : (char# -> bool) -> pstate -> pos:int16# -> int16#
+```
+
+Skip characters while predicate holds, return new position.
+
+### take
+
+```ocaml
+val take : int16# -> pstate -> pos:int16# -> #(Span.t * int16#)
+```
+
+Take exactly n characters as span, return span and new position. Raises `Parse_error` with `Partial` if not enough bytes.
+
+<ParamField path="n" type="int16#">
+  Number of characters to take
+</ParamField>
+
+### skip
+
+```ocaml
+val skip : int16# -> pstate -> pos:int16# -> int16#
+```
+
+Skip exactly n characters, return new position. Raises `Parse_error` with `Partial` if not enough bytes.
+
+### satisfy
+
+```ocaml
+val satisfy : 
+  (char# -> bool) -> 
+  pstate -> 
+  pos:int16# -> 
+  #(char# * int16#)
+```
+
+Match character satisfying predicate, return character and new position. Raises `Parse_error` if predicate fails or at end.
+
+**Example:**
+```ocaml
+let #(digit, pos) = Parser.satisfy is_digit pst ~pos in
+```
+
+### optional
+
+```ocaml
+val optional : 
+  (pstate -> pos:int16# -> #('a * int16#)) -> 
+  pstate -> 
+  pos:int16# -> 
+  #('a or_null * int16#)
+```
+
+Try parser, return `Null` and original position on failure. Returns `#('a)` (unboxed option) on success.
+
+<ParamField path="parser" type="pstate -> pos:int16# -> #('a * int16#)">
+  Parser to try
+</ParamField>
+
+**Example:**
+```ocaml
+let #(version_opt, pos) = Parser.optional Parser.http_version pst ~pos in
+match version_opt with
+| Null -> (* No version found *)
+| #(version) -> (* Use version *)
+```
+
+## HTTP-Specific Combinators
+
+### crlf
+
+```ocaml
+val crlf : pstate -> pos:int16# -> int16#
+```
+
+Match CRLF sequence (`\r\n`), return new position. Raises `Parse_error` if not found.
+
+**Example:**
+```ocaml
+let pos = Parser.crlf pst ~pos in (* Consume line ending *)
+```
+
+### sp
+
+```ocaml
+val sp : pstate -> pos:int16# -> int16#
+```
+
+Match single space character (SP), return new position.
+
+### token
+
+```ocaml
+val token : pstate -> pos:int16# -> #(Span.t * int16#)
+```
+
+Take HTTP token characters (for method, header names), return span and new position. Must be non-empty. Raises `Malformed` if empty.
+
+Token characters are: alphanumeric and `!#$%&'*+-.^_`|~`
+
+**Example:**
+```ocaml
+let #(method_span, pos) = Parser.token pst ~pos in
+```
+
+### ows
+
+```ocaml
+val ows : pstate -> pos:int16# -> int16#
+```
+
+Skip optional whitespace (OWS = SP / HTAB), return new position. OWS stands for "optional whitespace" in HTTP grammar.
+
+### http_version
+
+```ocaml
+val http_version : pstate -> pos:int16# -> #(Version.t * int16#)
+```
+
+Parse HTTP version (`HTTP/1.0` or `HTTP/1.1`), return version and new position. Raises `Parse_error` with `Invalid_version` if malformed.
+
+**Example:**
+```ocaml
+let #(version, pos) = Parser.http_version pst ~pos in
+match version with
+| Version.Http_1_0 -> (* HTTP/1.0 *)
+| Version.Http_1_1 -> (* HTTP/1.1 *)
+```
+
+### parse_method
+
+```ocaml
+val parse_method : pstate -> pos:int16# -> #(Method.t * int16#)
+```
+
+Parse HTTP method from token, return method enum and new position. Raises `Parse_error` with `Invalid_method` if unknown method.
+
+<ResponseField name="method" type="Method.t">
+  Parsed method: Get, Head, Post, Put, Delete, Connect, Options, Trace, or Patch
+</ResponseField>
+
+**Example:**
+```ocaml
+let #(meth, pos) = Parser.parse_method pst ~pos in
+```
+
+### parse_target
+
+```ocaml
+val parse_target : pstate -> pos:int16# -> #(Span.t * int16#)
+```
+
+Parse request target, return span and new position. Raises `Parse_error` with `Invalid_target` if empty.
+
+### request_line
+
+```ocaml
+val request_line : 
+  pstate -> 
+  pos:int16# -> 
+  #(Method.t * Span.t * Version.t * int16#)
+```
+
+Parse complete request line: `METHOD SP target SP version CRLF`.
+
+<ResponseField name="method" type="Method.t">
+  HTTP method
+</ResponseField>
+
+<ResponseField name="target" type="Span.t">
+  Request target span
+</ResponseField>
+
+<ResponseField name="version" type="Version.t">
+  HTTP version
+</ResponseField>
+
+<ResponseField name="pos" type="int16#">
+  Position after request line
+</ResponseField>
+
+**Example:**
+```ocaml
+let pst = Parser.make buf ~len in
+let #(meth, target, version, pos) = Parser.request_line pst ~pos:(i16 0) in
+let target_str = Span.to_string pst.#buf target in
+```
+
+### parse_header
+
+```ocaml
+val parse_header : 
+  pstate -> 
+  pos:int16# -> 
+  #(Header_name.t * Span.t * Span.t * int16#)
+```
+
+Parse a single header line: `name: value CRLF`.
+
+<ResponseField name="header_name" type="Header_name.t">
+  Parsed header name enum (or `Other` for unknown headers)
+</ResponseField>
+
+<ResponseField name="name_span" type="Span.t">
+  Span of header name (meaningful when header_name is `Other`)
+</ResponseField>
+
+<ResponseField name="value_span" type="Span.t">
+  Span of header value (leading/trailing OWS trimmed)
+</ResponseField>
+
+<ResponseField name="pos" type="int16#">
+  Position after header line
+</ResponseField>
+
+**Example:**
+```ocaml
+let #(name, name_span, value_span, pos) = Parser.parse_header pst ~pos in
+match name with
+| Header_name.Content_length ->
+  let len = Span.parse_int64 pst.#buf value_span in
+  (* ... *)
+| Header_name.Other ->
+  if Span.equal_caseless pst.#buf name_span "x-custom" then
+    let value = Span.to_string pst.#buf value_span in
+    (* Handle custom header *)
+| _ -> ()
+```
+
+### is_headers_end
+
+```ocaml
+val is_headers_end : pstate -> pos:int16# -> bool
+```
+
+Check if at end of headers (CRLF at current position, indicating empty line).
+
+**Example:**
+```ocaml
+if Parser.is_headers_end pst ~pos then
+  let pos = Parser.end_headers pst ~pos in
+  (* pos now points to body *)
+```
+
+### end_headers
+
+```ocaml
+val end_headers : pstate -> pos:int16# -> int16#
+```
+
+Skip the empty line at end of headers (consume final CRLF), return new position pointing to body.
+
+## Usage Pattern
+
+The typical pattern for using parser combinators:
+
+```ocaml
+open Httpz
+
+let parse_request buf ~len ~limits =
+  try
+    let pst = Parser.make buf ~len in
+    
+    (* Parse request line *)
+    let #(meth, target, version, pos) = 
+      Parser.request_line pst ~pos:(i16 0) 
+    in
+    
+    (* Parse headers in a loop *)
+    let rec parse_headers pos acc =
+      if Parser.is_headers_end pst ~pos then
+        let body_off = Parser.end_headers pst ~pos in
+        #(body_off, List.rev acc)
+      else
+        let #(name, name_span, value_span, pos) = 
+          Parser.parse_header pst ~pos 
+        in
+        let hdr = { Header.name; name_span; value = value_span } in
+        parse_headers pos (hdr :: acc)
+    in
+    
+    let #(body_off, headers) = parse_headers pos [] in
+    
+    (* Build request *)
+    Ok #(meth, target, version, body_off, headers)
+    
+  with Parser.Parse_error status ->
+    Error status
+```
+
+## Error Handling
+
+All combinators raise `Parse_error` exception with specific status:
+
+- **Partial** - Need more data (at end of buffer)
+- **Malformed** - Invalid syntax
+- **Invalid_method** - Unknown HTTP method
+- **Invalid_target** - Empty or invalid target
+- **Invalid_version** - Malformed HTTP version
+- **Invalid_header** - Malformed header line
+
+Handle errors using try/catch:
+
+```ocaml
+try
+  let #(result, pos) = Parser.some_combinator pst ~pos in
+  (* Success *)
+with Parser.Parse_error status ->
+  match status with
+  | Partial -> need_more_data ()
+  | Malformed -> send_400 ()
+  | _ -> send_error ()
+```
+
+## Performance Notes
+
+- **Zero allocation** - Position threading avoids closure allocation
+- **Unboxed types** - Uses `char#`, `int16#`, and unboxed tuples
+- **Explicit position** - No hidden state, enables optimization
+- **Single-pass** - Parse data in one forward pass
+- **Stack results** - All results returned with `@ local` annotation

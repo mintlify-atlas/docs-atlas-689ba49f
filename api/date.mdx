@@ -1,0 +1,400 @@
+---
+title: Date
+description: HTTP-date parsing and formatting per RFC 7231
+---
+
+The `Date` module provides zero-allocation parsing and formatting for HTTP date values per [RFC 7231 Section 7.1.1.1](https://datatracker.ietf.org/doc/html/rfc7231#section-7.1.1.1). It handles all three accepted HTTP date formats and generates the preferred IMF-fixdate format.
+
+## Overview
+
+HTTP uses a restricted subset of date formats for headers like `Date`, `Last-Modified`, `If-Modified-Since`, `If-Unmodified-Since`, and `Expires`. This module:
+- Parses all three accepted formats
+- Returns timestamps as unboxed `float#` (Unix seconds since epoch)
+- Generates dates in the preferred IMF-fixdate format
+- Provides comparison helpers for conditional requests
+
+## Accepted Date Formats
+
+<ResponseField name="IMF-fixdate" type="preferred">
+  **Format:** `Sun, 06 Nov 1994 08:49:37 GMT`
+  
+  This is the preferred format for all HTTP date generation.
+</ResponseField>
+
+<ResponseField name="RFC 850" type="obsolete">
+  **Format:** `Sunday, 06-Nov-94 08:49:37 GMT`
+  
+  Obsolete format with 2-digit year. Accepted for parsing only.
+</ResponseField>
+
+<ResponseField name="ANSI C asctime" type="obsolete">
+  **Format:** `Sun Nov  6 08:49:37 1994`
+  
+  ANSI C `asctime()` format. Accepted for parsing only.
+</ResponseField>
+
+## Types
+
+### Parse Status
+
+<ResponseField name="status" type="variant">
+  Result status from date parsing.
+  
+  <ResponseField name="Valid">
+    Successfully parsed valid HTTP-date
+  </ResponseField>
+  
+  <ResponseField name="Invalid">
+    Invalid date format or out-of-range values
+  </ResponseField>
+</ResponseField>
+
+## Parsing Functions
+
+### parse
+
+```ocaml
+val parse : local_ Base_bigstring.t -> Span.t -> #(status * float#)
+```
+
+Parse HTTP-date from buffer span. Automatically detects and parses all three accepted formats.
+
+<ParamField path="buf" type="Base_bigstring.t" required>
+  Buffer containing the date value (marked as local)
+</ParamField>
+
+<ParamField path="span" type="Span.t" required>
+  Span indicating the date value location in buffer
+</ParamField>
+
+**Returns:** Unboxed tuple `#(status * float#)` where:
+- First value is parse status
+- Second value is Unix timestamp (seconds since epoch) - only valid if status is `Valid`
+
+**Example:**
+
+```ocaml
+(* Parse If-Modified-Since header *)
+let if_modified_since = Req.find_header req Header_name.If_modified_since in
+match if_modified_since with
+| Some span ->
+  let #(status, timestamp) = Date.parse (Req.buf req) span in
+  (match status with
+  | Date.Valid ->
+    (* Check if resource was modified *)
+    if Date.is_modified_since ~last_modified:resource.mtime ~if_modified_since:timestamp then
+      send_full_response ()
+    else
+      send_304_not_modified ()
+  | Date.Invalid ->
+    (* Ignore malformed date *)
+    send_full_response ())
+| None ->
+  send_full_response ()
+```
+
+## Formatting Functions
+
+### format
+
+```ocaml
+val format : float# -> string
+```
+
+Format Unix timestamp as IMF-fixdate string (allocates).
+
+<ParamField path="timestamp" type="float#" required>
+  Unix timestamp (seconds since epoch) as unboxed float
+</ParamField>
+
+**Returns:** String in IMF-fixdate format: `"Sun, 06 Nov 1994 08:49:37 GMT"`
+
+**Example:**
+
+```ocaml
+let now = Unix.gettimeofday () in
+let date_str = Date.format (f64 now) in
+Printf.printf "Current date: %s\n" date_str
+(* Output: Current date: Wed, 04 Mar 2026 12:34:56 GMT *)
+```
+
+## Response Writing
+
+### write_date_header
+
+```ocaml
+val write_date_header : Base_bigstring.t -> off:int16# -> float# -> int16#
+```
+
+Write `Date: <timestamp>\r\n` header to response buffer.
+
+<ParamField path="buf" type="Base_bigstring.t" required>
+  Destination buffer
+</ParamField>
+
+<ParamField path="off" type="int16#" required>
+  Current offset in buffer
+</ParamField>
+
+<ParamField path="timestamp" type="float#" required>
+  Unix timestamp to write
+</ParamField>
+
+**Returns:** New offset after writing.
+
+**Example:**
+
+```ocaml
+let now = f64 (Unix.gettimeofday ()) in
+let off = Res.write_status_line buf ~off 200 in
+let off = Date.write_date_header buf ~off now in
+let off = Res.write_content_length buf ~off content_len in
+(* ... *)
+```
+
+### write_last_modified
+
+```ocaml
+val write_last_modified : Base_bigstring.t -> off:int16# -> float# -> int16#
+```
+
+Write `Last-Modified: <timestamp>\r\n` header to response buffer.
+
+<ParamField path="buf" type="Base_bigstring.t" required>
+  Destination buffer
+</ParamField>
+
+<ParamField path="off" type="int16#" required>
+  Current offset in buffer
+</ParamField>
+
+<ParamField path="timestamp" type="float#" required>
+  Last modification timestamp
+</ParamField>
+
+**Returns:** New offset after writing.
+
+**Example:**
+
+```ocaml
+let file_stat = Unix.stat filename in
+let mtime = f64 file_stat.st_mtime in
+let off = Res.write_status_line buf ~off 200 in
+let off = Date.write_last_modified buf ~off mtime in
+(* ... *)
+```
+
+### write_expires
+
+```ocaml
+val write_expires : Base_bigstring.t -> off:int16# -> float# -> int16#
+```
+
+Write `Expires: <timestamp>\r\n` header to response buffer.
+
+<ParamField path="buf" type="Base_bigstring.t" required>
+  Destination buffer
+</ParamField>
+
+<ParamField path="off" type="int16#" required>
+  Current offset in buffer
+</ParamField>
+
+<ParamField path="timestamp" type="float#" required>
+  Expiration timestamp
+</ParamField>
+
+**Returns:** New offset after writing.
+
+**Example:**
+
+```ocaml
+(* Set expiration 1 hour from now *)
+let now = Unix.gettimeofday () in
+let expires = f64 (now +. 3600.0) in
+let off = Res.write_status_line buf ~off 200 in
+let off = Date.write_expires buf ~off expires in
+(* ... *)
+```
+
+### write_http_date
+
+```ocaml
+val write_http_date : Base_bigstring.t -> off:int16# -> float# -> int16#
+```
+
+Write formatted HTTP-date at offset without header name or CRLF. Used internally by header writers.
+
+<ParamField path="buf" type="Base_bigstring.t" required>
+  Destination buffer
+</ParamField>
+
+<ParamField path="off" type="int16#" required>
+  Current offset in buffer
+</ParamField>
+
+<ParamField path="timestamp" type="float#" required>
+  Unix timestamp to format
+</ParamField>
+
+**Returns:** New offset after writing.
+
+**Example:**
+
+```ocaml
+(* Write custom date header *)
+let off = Buf_write.string buf ~off "X-Custom-Date: " in
+let off = Date.write_http_date buf ~off timestamp in
+let off = Buf_write.crlf buf ~off in
+```
+
+## Comparison Helpers
+
+### is_modified_since
+
+```ocaml
+val is_modified_since : last_modified:float# -> if_modified_since:float# -> bool
+```
+
+Check if resource was modified since the given date. Used for `If-Modified-Since` header processing.
+
+<ParamField path="last_modified" type="float#" required>
+  Resource's last modification timestamp
+</ParamField>
+
+<ParamField path="if_modified_since" type="float#" required>
+  Timestamp from `If-Modified-Since` header
+</ParamField>
+
+**Returns:** `true` if resource has been modified after the if_modified_since date (serve full content), `false` otherwise (send 304).
+
+**Note:** HTTP dates have 1-second resolution. Comparison uses `>` not `>=` to handle precision correctly.
+
+**Example:**
+
+```ocaml
+(* Handle If-Modified-Since for GET request *)
+let handle_if_modified_since req resource =
+  match Req.find_header req Header_name.If_modified_since with
+  | Some span ->
+    let #(status, client_date) = Date.parse (Req.buf req) span in
+    if status = Date.Valid then
+      if Date.is_modified_since 
+          ~last_modified:resource.mtime 
+          ~if_modified_since:client_date 
+      then
+        (* Resource modified - send full response *)
+        send_200_with_content resource
+      else
+        (* Not modified - send 304 *)
+        let off = Res.write_status_line buf ~off:(i16 0) 304 in
+        let off = Date.write_last_modified buf ~off resource.mtime in
+        let off = Res.crlf buf ~off in
+        send_response ~len:off
+    else
+      (* Invalid date - ignore header *)
+      send_200_with_content resource
+  | None ->
+    send_200_with_content resource
+```
+
+### is_unmodified_since
+
+```ocaml
+val is_unmodified_since : last_modified:float# -> if_unmodified_since:float# -> bool
+```
+
+Check if resource was not modified since the given date. Used for `If-Unmodified-Since` header processing.
+
+<ParamField path="last_modified" type="float#" required>
+  Resource's last modification timestamp
+</ParamField>
+
+<ParamField path="if_unmodified_since" type="float#" required>
+  Timestamp from `If-Unmodified-Since` header
+</ParamField>
+
+**Returns:** `true` if resource has NOT been modified after the if_unmodified_since date (safe to proceed), `false` otherwise (send 412 Precondition Failed).
+
+**Example:**
+
+```ocaml
+(* Handle If-Unmodified-Since for PUT/PATCH request *)
+let handle_if_unmodified_since req resource =
+  match Req.find_header req Header_name.If_unmodified_since with
+  | Some span ->
+    let #(status, client_date) = Date.parse (Req.buf req) span in
+    if status = Date.Valid then
+      if Date.is_unmodified_since
+          ~last_modified:resource.mtime
+          ~if_unmodified_since:client_date
+      then
+        (* Precondition met - proceed with update *)
+        update_resource resource
+      else
+        (* Resource modified - send 412 Precondition Failed *)
+        let off = Res.write_status_line buf ~off:(i16 0) 412 in
+        let off = Date.write_last_modified buf ~off resource.mtime in
+        let off = Res.crlf buf ~off in
+        send_response ~len:off
+    else
+      (* Invalid date - ignore header *)
+      update_resource resource
+  | None ->
+    update_resource resource
+```
+
+## Complete Example: Conditional Requests
+
+```ocaml
+(* Handle GET request with full conditional logic *)
+let handle_conditional_get req resource =
+  let buf = Req.buf req in
+  let resource_mtime = resource.last_modified in  (* float# *)
+  
+  (* Check If-Modified-Since *)
+  let not_modified = match Req.find_header req Header_name.If_modified_since with
+  | Some span ->
+    let #(status, client_date) = Date.parse buf span in
+    if status = Date.Valid then
+      not (Date.is_modified_since ~last_modified:resource_mtime ~if_modified_since:client_date)
+    else
+      false
+  | None -> false
+  in
+  
+  if not_modified then
+    (* Send 304 Not Modified *)
+    let off = Res.write_status_line response_buf ~off:(i16 0) 304 in
+    let now = f64 (Unix.gettimeofday ()) in
+    let off = Date.write_date_header response_buf ~off now in
+    let off = Date.write_last_modified response_buf ~off resource_mtime in
+    let off = Res.crlf response_buf ~off in
+    send_response ~len:off
+  else
+    (* Send full 200 response *)
+    let off = Res.write_status_line response_buf ~off:(i16 0) 200 in
+    let now = f64 (Unix.gettimeofday ()) in
+    let off = Date.write_date_header response_buf ~off now in
+    let off = Date.write_last_modified response_buf ~off resource_mtime in
+    let off = Res.write_content_length response_buf ~off (i64 (Int64.of_int resource.content_length)) in
+    
+    (* Set cache expiration (1 hour) *)
+    let expires = f64 (Unix.gettimeofday () +. 3600.0) in
+    let off = Date.write_expires response_buf ~off expires in
+    
+    let off = Res.crlf response_buf ~off in
+    let off = write_body response_buf ~off resource.content in
+    send_response ~len:off
+```
+
+## Implementation Notes
+
+- All parsing returns unboxed `float#` timestamps for zero-allocation operation
+- Date parsing handles leap years correctly
+- RFC 850 2-digit years are interpreted as:
+  - `00-69` → `2000-2069`
+  - `70-99` → `1970-1999`
+- All generated dates use GMT timezone (as required by RFC 7231)
+- Leap seconds (`:60`) are accepted during parsing
+- Comparison functions account for 1-second precision of HTTP dates

@@ -1,0 +1,173 @@
+---
+title: Introduction
+description: Learn about httpz - a zero-allocation HTTP/1.1 parser for OxCaml
+---
+
+# httpz - Zero-Allocation HTTP/1.1 Parser for OxCaml
+
+httpz is a high-performance HTTP/1.1 parser and serializer that achieves **true zero heap allocations** using OxCaml's unboxed types and local allocations. It's designed for building high-throughput web servers and parsers where every allocation matters.
+
+## What is httpz?
+
+httpz parses HTTP/1.1 requests from a 32KB bigarray buffer and returns all results **entirely on the caller's stack**—no heap allocation during parsing, no mutable state. This is made possible through OxCaml's advanced type system features:
+
+- **Unboxed records** (`#{...}`): Request, span, and header types are stack-allocated
+- **Unboxed primitives**: `int16#` for buffer offsets, `int64#` for content lengths, `char#` for byte comparisons
+- **Local lists** (`@ local`): Header list grows on the stack, not heap
+- **Span-based parsing**: Strings are referenced by offset+length into the input buffer
+
+## Key Features
+
+<CardGroup cols={2}>
+  <Card title="Zero Heap Allocations" icon="gauge-high">
+    Parser results are stack-allocated using OxCaml unboxed records and local lists. All values remain on the stack.
+  </Card>
+  
+  <Card title="Unboxed Integers" icon="binary">
+    Uses `int16#` for offsets/counts and `int64#` for content lengths—no boxing overhead throughout the codebase.
+  </Card>
+  
+  <Card title="Direct Bigstring I/O" icon="database">
+    Read and write directly to/from bigarray buffers for zero-copy performance.
+  </Card>
+  
+  <Card title="RFC 7230 Security" icon="shield-check">
+    Built-in protection against HTTP request smuggling, bare CR detection, and ambiguous framing.
+  </Card>
+</CardGroup>
+
+## Performance Characteristics
+
+Benchmarks comparing httpz (OxCaml) vs httpe (Eio-based parser):
+
+| Request Size | httpz (ns/op) | httpe (ns/op) | Speedup | Allocation Reduction |
+|--------------|---------------|---------------|---------|---------------------|
+| Small (35B)  | 154           | 159           | 1.03x   | **45x fewer words**  |
+| Medium (439B)| 1,150         | 1,218         | 1.06x   | **399x fewer words** |
+| Large (1155B)| 2,762         | 2,912         | 1.05x   | **823x fewer words** |
+
+**Throughput**: 6.5M requests/sec
+
+### Detailed Timings
+
+<Note>
+All operations achieve **0 words** heap allocation—values are stack-allocated via unboxed records.
+</Note>
+
+| Operation | Time | Heap Allocations |
+|-----------|------|------------------|
+| Parse minimal request (35B) | 300ns | 0 words |
+| Parse simple request (4 headers) | 925ns | 0 words |
+| Parse browser request (10 headers) | 3.3μs | 0 words |
+| Parse 50 headers | 11.2μs | 0 words |
+| Write status line | 76ns | 0 words |
+| Write full response headers | 454ns | 0 words |
+
+## When to Use httpz
+
+httpz is ideal for:
+
+- **High-performance web servers** where allocation overhead impacts throughput
+- **Resource-constrained environments** where GC pressure is a concern
+- **Latency-sensitive applications** requiring predictable performance
+- **Learning OxCaml's unboxed types** and zero-allocation programming techniques
+
+<Warning>
+httpz requires the **OxCaml compiler** (OCaml 5.2+ with unboxed types). It will not compile with standard OCaml.
+</Warning>
+
+## Architecture
+
+httpz achieves zero-allocation parsing through several key design decisions:
+
+### 1. Pre-allocated Buffers
+
+The parser operates on a fixed 32KB buffer that's reused across requests:
+
+```ocaml
+let buf = Httpz.create_buffer ()  (* Allocate once *)
+```
+
+### 2. Unboxed Records
+
+All parser results use unboxed record syntax `#{...}` which are allocated on the stack:
+
+```ocaml
+type t = #{
+  meth : Method.t;
+  target : Span.t;
+  version : Version.t;
+  content_length : int64#;  (* Unboxed int64 *)
+  is_chunked : bool;
+  keep_alive : bool;
+}
+```
+
+### 3. Span-Based String References
+
+Instead of creating string copies, httpz uses "spans"—offset and length pairs into the buffer:
+
+```ocaml
+type span = #{ off : int16#; len : int16# }
+```
+
+### 4. Threaded Position State
+
+Parser combinators thread position explicitly through all functions, avoiding mutable state:
+
+```ocaml
+val token : pstate -> pos:int16# -> #(Span.t * int16#)
+```
+
+## HTTP/1.1 Support
+
+httpz provides complete HTTP/1.1 support:
+
+- All standard HTTP methods (GET, POST, PUT, DELETE, etc.)
+- Header parsing with known header optimization
+- Chunked transfer encoding
+- Keep-alive connection handling
+- Range requests (byte ranges)
+- ETags (strong and weak)
+- Conditional GET (If-None-Match)
+- RFC 7230 security validations
+
+## What's Included
+
+The httpz package includes:
+
+- **Core parser** (`Httpz` module) - Zero-allocation HTTP/1.1 parsing
+- **Response writer** (`Httpz.Res`, `Httpz.Buf_write`) - Efficient response generation
+- **Static file server** - Production-ready Async-based server with:
+  - Concurrent connection handling (up to 10,000 connections)
+  - Zero-copy bigstring I/O
+  - MIME type detection
+  - Directory traversal protection
+  - Range request support
+  - ETag caching
+
+## Security Features
+
+<Info>
+httpz implements RFC 7230 security checks to prevent common HTTP attacks.
+</Info>
+
+The parser provides built-in protection against:
+
+- **Content-Length overflow** - Configurable limits with overflow detection
+- **Bare CR detection** - Prevents HTTP request smuggling attacks
+- **Ambiguous framing** - Rejects requests with both Content-Length and Transfer-Encoding
+- **Missing Host header** - Enforces Host header requirement for HTTP/1.1
+- **CRLF injection** - Detects injection attempts in header values
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Installation" icon="download" href="/installation">
+    Set up OxCaml and install httpz via opam
+  </Card>
+  
+  <Card title="Quick Start" icon="rocket" href="/quickstart">
+    Parse your first HTTP request with zero allocations
+  </Card>
+</CardGroup>

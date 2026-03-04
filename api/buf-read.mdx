@@ -1,0 +1,465 @@
+---
+title: Buf_read
+description: Buffer reading utilities and status types for HTTP parsing
+---
+
+The `Buf_read` module provides low-level buffer reading utilities, status types, and helper functions for HTTP parsing. It defines the buffer type, security limits, and character classification functions.
+
+## Types
+
+### status
+
+```ocaml
+type status =
+  | Complete
+  | Partial
+  | Invalid_method
+  | Invalid_target
+  | Invalid_version
+  | Invalid_header
+  | Headers_too_large
+  | Malformed
+  | Content_length_overflow
+  | Ambiguous_framing
+  | Bare_cr_detected
+  | Missing_host_header
+  | Unsupported_transfer_encoding
+```
+
+HTTP parsing result status.
+
+<ResponseField name="Complete" type="status">
+  Successfully parsed complete request
+</ResponseField>
+
+<ResponseField name="Partial" type="status">
+  Need more data to complete parsing
+</ResponseField>
+
+<ResponseField name="Invalid_method" type="status">
+  Unknown or invalid HTTP method
+</ResponseField>
+
+<ResponseField name="Invalid_target" type="status">
+  Empty or malformed request target
+</ResponseField>
+
+<ResponseField name="Invalid_version" type="status">
+  Malformed HTTP version
+</ResponseField>
+
+<ResponseField name="Invalid_header" type="status">
+  Malformed header line
+</ResponseField>
+
+<ResponseField name="Headers_too_large" type="status">
+  Headers exceed max_header_size limit
+</ResponseField>
+
+<ResponseField name="Malformed" type="status">
+  General syntax error
+</ResponseField>
+
+<ResponseField name="Content_length_overflow" type="status">
+  Content-Length value exceeds max_content_length or is invalid. **Security check**: Prevents resource exhaustion attacks.
+</ResponseField>
+
+<ResponseField name="Ambiguous_framing" type="status">
+  Both Content-Length and Transfer-Encoding headers present. **Security violation** per RFC 7230 - indicates potential request smuggling attack.
+</ResponseField>
+
+<ResponseField name="Bare_cr_detected" type="status">
+  CR character without following LF detected. **Security violation** per RFC 7230 Section 3.5 - indicates potential HTTP request smuggling attempt.
+</ResponseField>
+
+<ResponseField name="Missing_host_header" type="status">
+  HTTP/1.1 request missing required Host header
+</ResponseField>
+
+<ResponseField name="Unsupported_transfer_encoding" type="status">
+  Transfer-Encoding other than "chunked" or "identity" per RFC 7230 Section 3.3.1
+</ResponseField>
+
+### limits
+
+```ocaml
+type limits = #{
+  max_content_length : int64#
+  max_header_size : int16#
+  max_header_count : int16#
+  max_chunk_size : int
+}
+```
+
+Configurable security limits for parsing.
+
+<ResponseField name="max_content_length" type="int64#">
+  Maximum Content-Length value in bytes. Default: 100MB (104,857,600 bytes). Requests with larger Content-Length are rejected.
+</ResponseField>
+
+<ResponseField name="max_header_size" type="int16#">
+  Maximum total size of all headers combined in bytes. Default: 16KB (16,384 bytes). Prevents header buffer overflow.
+</ResponseField>
+
+<ResponseField name="max_header_count" type="int16#">
+  Maximum number of headers allowed. Default: 100 headers. Prevents resource exhaustion from excessive headers.
+</ResponseField>
+
+<ResponseField name="max_chunk_size" type="int">
+  Maximum chunk size for chunked transfer encoding in bytes. Default: 16MB (16,777,216 bytes).
+</ResponseField>
+
+## Constants
+
+### buffer_size
+
+```ocaml
+val buffer_size : int
+```
+
+Maximum buffer size: 32KB (32,768 bytes).
+
+### max_headers
+
+```ocaml
+val max_headers : int16#
+```
+
+Maximum headers per request (matches `default_limits.max_header_count`).
+
+### default_limits
+
+```ocaml
+val default_limits : limits
+```
+
+Default security limits:
+```ocaml
+#{ max_content_length = 104_857_600L#  (* 100MB *)
+ ; max_header_size = 16_384#             (* 16KB *)
+ ; max_header_count = 100#               (* 100 headers *)
+ ; max_chunk_size = 16_777_216           (* 16MB *)
+}
+```
+
+## Buffer Operations
+
+### create
+
+```ocaml
+val create : unit -> Base_bigstring.t
+```
+
+Create a new 32KB bigarray buffer.
+
+**Example:**
+```ocaml
+let buf = Buf_read.create () in
+let len = Unix.read fd buf 0 Buf_read.buffer_size in
+```
+
+### peek
+
+```ocaml
+val peek : local_ Base_bigstring.t -> int16# -> char#
+```
+
+Get character at int16# position (unchecked - no bounds checking).
+
+<ParamField path="buf" type="Base_bigstring.t">
+  Buffer to read from
+</ParamField>
+
+<ParamField path="pos" type="int16#">
+  Position to read (must be valid)
+</ParamField>
+
+**Example:**
+```ocaml
+let c = Buf_read.peek buf (i16 0) in
+```
+
+### find_crlf
+
+```ocaml
+val find_crlf : 
+  local_ Base_bigstring.t -> 
+  pos:int16# -> 
+  len:int16# -> 
+  int16#
+```
+
+Find CRLF sequence starting at position. Returns position of CR, or `-1` as int16# if not found.
+
+<ParamField path="buf" type="Base_bigstring.t">
+  Buffer to search
+</ParamField>
+
+<ParamField path="pos" type="int16#">
+  Starting position
+</ParamField>
+
+<ParamField path="len" type="int16#">
+  Length of valid data in buffer
+</ParamField>
+
+**Example:**
+```ocaml
+let crlf_pos = Buf_read.find_crlf buf ~pos:(i16 0) ~len in
+if crlf_pos <>. i16 (-1) then
+  (* Found CRLF at crlf_pos *)
+```
+
+## Character Classification
+
+### is_token_char
+
+```ocaml
+val is_token_char : char# -> bool
+```
+
+Check if character is valid HTTP token character. Token characters are:
+- Alphanumeric: `a-z`, `A-Z`, `0-9`
+- Special: `!#$%&'*+-.^_`|~`
+
+**Example:**
+```ocaml
+if Buf_read.is_token_char c then
+  (* Valid in header name or method *)
+```
+
+### is_space
+
+```ocaml
+val is_space : char# -> bool
+```
+
+Check if character is whitespace (space or tab).
+
+### to_lower
+
+```ocaml
+val to_lower : char# -> char#
+```
+
+Convert character to lowercase.
+
+**Example:**
+```ocaml
+let lower_c = Buf_read.to_lower c in
+```
+
+## Character Comparison
+
+### (=.)
+
+```ocaml
+val ( =. ) : char# -> char# -> bool
+```
+
+Unboxed character equality comparison.
+
+**Example:**
+```ocaml
+if c =. '\r' then (* handle CR *)
+```
+
+### `(<>.)`
+
+```ocaml
+val ( <>. ) : char# -> char# -> bool
+```
+
+Unboxed character inequality comparison.
+
+## Type Conversions
+
+### i16
+
+```ocaml
+val i16 : int -> int16#
+```
+
+Convert int to int16#.
+
+**Example:**
+```ocaml
+let pos = i16 0 in
+let len = i16 1024 in
+```
+
+### to_int
+
+```ocaml
+val to_int : int16# -> int
+```
+
+Convert int16# to int.
+
+**Example:**
+```ocaml
+let offset_int = Buf_read.to_int pos in
+```
+
+## Security Functions
+
+### has_bare_cr
+
+```ocaml
+val has_bare_cr : 
+  local_ Base_bigstring.t -> 
+  pos:int16# -> 
+  len:int16# -> 
+  bool
+```
+
+Detect bare CR (CR not followed by LF) per RFC 7230 Section 3.5. Used to prevent HTTP request smuggling attacks.
+
+<ParamField path="buf" type="Base_bigstring.t">
+  Buffer to check
+</ParamField>
+
+<ParamField path="pos" type="int16#">
+  Starting position
+</ParamField>
+
+<ParamField path="len" type="int16#">
+  Length to check
+</ParamField>
+
+**Example:**
+```ocaml
+if Buf_read.has_bare_cr buf ~pos:value_start ~len:value_len then
+  raise (Parse_error Bare_cr_detected)
+```
+
+### has_crlf_injection
+
+```ocaml
+val has_crlf_injection : 
+  local_ Base_bigstring.t -> 
+  pos:int16# -> 
+  len:int16# -> 
+  bool
+```
+
+Check if a value contains CRLF injection attempt (any CRLF sequence in the span).
+
+## Formatting
+
+### status_to_string
+
+```ocaml
+val status_to_string : status -> string
+```
+
+Convert status to string representation.
+
+**Example:**
+```ocaml
+let msg = Buf_read.status_to_string status in
+printf "Parse error: %s\n" msg
+```
+
+### pp_status
+
+```ocaml
+val pp_status : Stdlib.Format.formatter -> status -> unit
+```
+
+Pretty-print status for debugging.
+
+### pp
+
+```ocaml
+val pp : Stdlib.Format.formatter -> Base_bigstring.t -> unit
+```
+
+Pretty-print buffer contents.
+
+## Usage Example
+
+```ocaml
+open Httpz
+
+let handle_parse_status buf status req headers =
+  match status with
+  | Buf_read.Complete ->
+    (* Successfully parsed *)
+    process_request buf req headers
+    
+  | Buf_read.Partial ->
+    (* Need more data *)
+    read_more_data ()
+    
+  | Buf_read.Content_length_overflow ->
+    (* Content-Length too large - security violation *)
+    send_response_413 "Payload Too Large"
+    
+  | Buf_read.Bare_cr_detected ->
+    (* Bare CR detected - potential smuggling attack *)
+    log_security_event "Bare CR detected";
+    send_response_400 "Bad Request"
+    
+  | Buf_read.Ambiguous_framing ->
+    (* Both Content-Length and Transfer-Encoding *)
+    log_security_event "Ambiguous framing detected";
+    send_response_400 "Bad Request"
+    
+  | Buf_read.Missing_host_header ->
+    (* HTTP/1.1 requires Host header *)
+    send_response_400 "Missing Host Header"
+    
+  | Buf_read.Headers_too_large ->
+    (* Headers exceed size limit *)
+    send_response_431 "Request Header Fields Too Large"
+    
+  | Buf_read.Invalid_method ->
+    send_response_501 "Not Implemented"
+    
+  | _ ->
+    (* Other errors *)
+    let msg = Buf_read.status_to_string status in
+    send_response_400 msg
+```
+
+## Custom Limits
+
+```ocaml
+(* Strict limits for public API *)
+let strict_limits = #{
+  max_content_length = 10_485_760L#  (* 10MB *)
+  max_header_size = 8_192#            (* 8KB *)
+  max_header_count = 50#              (* 50 headers *)
+  max_chunk_size = 1_048_576          (* 1MB *)
+}
+
+(* Relaxed limits for internal services *)
+let relaxed_limits = #{
+  max_content_length = 1_073_741_824L#  (* 1GB *)
+  max_header_size = 32_768#              (* 32KB *)
+  max_header_count = 200#                (* 200 headers *)
+  max_chunk_size = 67_108_864            (* 64MB *)
+}
+
+let #(status, req, headers) = 
+  Httpz.parse buf ~len ~limits:strict_limits
+in
+(* ... *)
+```
+
+## Security Considerations
+
+1. **Always validate status** - Check for security-related errors:
+   - `Bare_cr_detected` - Smuggling attempt
+   - `Ambiguous_framing` - Smuggling attempt
+   - `Content_length_overflow` - Resource exhaustion
+
+2. **Use appropriate limits** - Configure limits based on your threat model:
+   - Public APIs: Use strict limits
+   - Internal services: Can use relaxed limits
+   - File uploads: Increase `max_content_length`
+
+3. **Log security events** - Track security violations for monitoring
+
+4. **Reject, don't sanitize** - On security violations, reject the request rather than attempting to fix it

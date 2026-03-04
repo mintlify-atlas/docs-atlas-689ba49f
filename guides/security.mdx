@@ -1,0 +1,406 @@
+---
+title: Security Features
+description: Learn about httpz's RFC 7230 security features and protection against HTTP attacks
+---
+
+## Overview
+
+Httpz implements comprehensive security features from [RFC 7230](https://datatracker.ietf.org/doc/html/rfc7230) to protect against HTTP request smuggling, header injection, and resource exhaustion attacks. All security checks are built into the parser and enabled by default.
+
+## Security Features
+
+### 1. Bare CR Detection
+
+HTTP requires CRLF (`\r\n`) line endings. A bare CR (`\r` without `\n`) can enable request smuggling attacks where intermediaries and servers interpret message boundaries differently.
+
+#### Detection
+
+Httpz automatically detects bare CRs in header values:
+
+```ocaml
+let #(status, req, headers) = Httpz.parse buf ~len ~limits in
+
+match status with
+| Buf_read.Bare_cr_detected ->
+  (* Security violation detected *)
+  send_400_bad_request ()
+  (* Close connection immediately *)
+  close_connection ()
+
+| _ -> (* ... *)
+```
+
+#### Implementation
+
+The parser scans each header value for bare CRs:
+
+```ocaml
+(* From parser implementation *)
+Err.when_ (has_bare_cr buf ~pos:(Span.off16 value_span) ~len:(Span.len16 value_span))
+  Err.Bare_cr_detected;
+```
+
+<Warning>
+  Always reject requests with bare CRs by sending 400 Bad Request and closing the connection. Never attempt to sanitize or continue processing.
+</Warning>
+
+### 2. Ambiguous Framing Detection
+
+RFC 7230 forbids having both `Content-Length` and `Transfer-Encoding` headers, as this creates ambiguity in message framing that attackers can exploit.
+
+#### Detection
+
+```ocaml
+match status with
+| Buf_read.Ambiguous_framing ->
+  (* Both Content-Length and Transfer-Encoding present *)
+  send_400_bad_request ()
+  close_connection ()
+
+| _ -> (* ... *)
+```
+
+#### Implementation
+
+The parser tracks both headers and rejects if both are present:
+
+```ocaml
+(* When parsing Content-Length *)
+Err.when_ st.#has_te Err.Ambiguous_framing;
+
+(* When parsing Transfer-Encoding *)
+Err.when_ st.#has_cl Err.Ambiguous_framing;
+```
+
+<Note>
+  See RFC 7230 Section 3.3.3 for the specification on message body length determination.
+</Note>
+
+### 3. Content-Length Overflow Protection
+
+Validates that Content-Length values are within configurable limits and don't overflow during parsing.
+
+#### Configuration
+
+```ocaml
+let custom_limits =
+  #{ Buf_read.max_content_length = Int64_u.of_int64 50_000_000L  (* 50MB *)
+   ; max_header_size = Buf_read.i16 8192
+   ; max_header_count = Buf_read.i16 50
+   ; max_chunk_size = 8_388_608
+   }
+
+let #(status, req, headers) = 
+  Httpz.parse buf ~len ~limits:custom_limits
+```
+
+#### Detection
+
+```ocaml
+match status with
+| Buf_read.Content_length_overflow ->
+  (* Content-Length exceeds max_content_length or has too many digits *)
+  send_413_payload_too_large ()
+  close_connection ()
+
+| _ -> (* ... *)
+```
+
+#### Implementation
+
+The parser uses overflow-safe integer parsing:
+
+```ocaml
+let #(parsed_len, overflow) =
+  Span.parse_int64_limited buf value_span ~max_value:limits.#max_content_length
+in
+Err.when_ overflow Err.Content_length_overflow;
+```
+
+### 4. Host Header Requirement
+
+HTTP/1.1 requires a Host header for proper virtual hosting and security.
+
+#### Detection
+
+```ocaml
+match status with
+| Buf_read.Missing_host_header ->
+  (* HTTP/1.1 request without Host header *)
+  send_400_bad_request ()
+
+| _ -> (* ... *)
+```
+
+<Note>
+  HTTP/1.0 requests are not required to have a Host header.
+</Note>
+
+### 5. Transfer-Encoding Validation
+
+Only `chunked` and `identity` transfer encodings are supported, per RFC 7230.
+
+#### Detection
+
+```ocaml
+match status with
+| Buf_read.Unsupported_transfer_encoding ->
+  (* Transfer-Encoding other than chunked/identity *)
+  send_501_not_implemented ()
+
+| _ -> (* ... *)
+```
+
+#### Implementation
+
+```ocaml
+let is_chunked = Span.equal_caseless buf value_span "chunked" in
+let is_identity = Span.equal_caseless buf value_span "identity" in
+Err.when_ (not (is_chunked || is_identity)) Err.Unsupported_transfer_encoding;
+```
+
+### 6. Header Size Limits
+
+Protects against resource exhaustion from excessively large headers.
+
+#### Configuration
+
+```ocaml
+let limits =
+  #{ Buf_read.max_content_length = Int64_u.of_int64 100_000_000L
+   ; max_header_size = Buf_read.i16 16384      (* 16KB total *)
+   ; max_header_count = Buf_read.i16 100       (* 100 headers *)
+   ; max_chunk_size = 16_777_216
+   }
+```
+
+#### Detection
+
+```ocaml
+match status with
+| Buf_read.Headers_too_large ->
+  (* Headers exceed size or count limit *)
+  send_413_payload_too_large ()
+
+| _ -> (* ... *)
+```
+
+### 7. Chunk Size Limits
+
+For chunked transfer encoding, enforce maximum chunk sizes:
+
+```ocaml
+let #(chunk_status, chunk) = 
+  Chunk.parse_with_limit buf ~off ~len ~max_chunk_size:8_388_608  (* 8MB *)
+
+match chunk_status with
+| Chunk.Chunk_too_large ->
+  send_413_payload_too_large ()
+  close_connection ()
+
+| _ -> (* ... *)
+```
+
+## Default Security Limits
+
+Httpz provides sensible defaults:
+
+```ocaml
+Httpz.default_limits =
+  #{ max_content_length = 100MB
+   ; max_header_size = 16KB
+   ; max_header_count = 100 headers
+   ; max_chunk_size = 16MB
+   }
+```
+
+## Complete Security Example
+
+```ocaml
+let handle_request_securely socket root =
+  let buf = Httpz.create_buffer () in
+  
+  (* Custom strict limits for public-facing server *)
+  let strict_limits =
+    #{ Buf_read.max_content_length = Int64_u.of_int64 10_000_000L  (* 10MB *)
+     ; max_header_size = Buf_read.i16 8192                         (* 8KB *)
+     ; max_header_count = Buf_read.i16 50                          (* 50 headers *)
+     ; max_chunk_size = 4_194_304                                  (* 4MB chunks *)
+     }
+  in
+  
+  let len = read_from_socket socket buf in
+  let len16 = Buf_read.i16 len in
+  
+  let #(status, req, headers) = 
+    Httpz.parse buf ~len:len16 ~limits:strict_limits
+  in
+  
+  match status with
+  | Buf_read.Complete ->
+    (* Request is valid and safe to process *)
+    handle_valid_request socket buf req headers
+  
+  (* Security violations - log and close connection *)
+  | Buf_read.Bare_cr_detected ->
+    log_security_violation "Bare CR detected - potential smuggling attempt";
+    send_400 socket "Bad Request";
+    close_connection socket
+  
+  | Buf_read.Ambiguous_framing ->
+    log_security_violation "Ambiguous framing - both CL and TE";
+    send_400 socket "Bad Request";
+    close_connection socket
+  
+  (* Resource exhaustion attempts *)
+  | Buf_read.Content_length_overflow ->
+    log_security_violation "Content-Length overflow";
+    send_413 socket "Payload Too Large";
+    close_connection socket
+  
+  | Buf_read.Headers_too_large ->
+    log_security_violation "Headers too large";
+    send_413 socket "Payload Too Large";
+    close_connection socket
+  
+  (* Protocol violations *)
+  | Buf_read.Missing_host_header ->
+    log_warning "HTTP/1.1 request without Host header";
+    send_400 socket "Bad Request"
+  
+  | Buf_read.Unsupported_transfer_encoding ->
+    send_501 socket "Not Implemented"
+  
+  (* Other errors *)
+  | Buf_read.Partial ->
+    read_more_data socket buf
+  
+  | Buf_read.Invalid_method
+  | Buf_read.Invalid_target
+  | Buf_read.Invalid_version
+  | Buf_read.Invalid_header
+  | Buf_read.Malformed ->
+    send_400 socket "Bad Request";
+    close_connection socket
+```
+
+## Request Smuggling Prevention
+
+HTTP request smuggling exploits disagreements between front-end and back-end servers about request boundaries. Httpz prevents this by:
+
+### 1. Strict Message Framing
+
+- Rejects both Content-Length and Transfer-Encoding
+- Validates Transfer-Encoding values (only chunked/identity)
+- Detects bare CRs in header values
+
+### 2. Consistent Parsing
+
+- Single, unambiguous parser implementation
+- Zero-allocation parsing eliminates parser state bugs
+- Explicit RFC 7230 compliance
+
+### 3. Attack Detection
+
+```ocaml
+(* Example attack: CL.TE smuggling attempt *)
+let malicious_request = 
+  "POST / HTTP/1.1\r\n" ^
+  "Host: example.com\r\n" ^
+  "Content-Length: 6\r\n" ^
+  "Transfer-Encoding: chunked\r\n" ^
+  "\r\n" ^
+  "0\r\n\r\n" ^
+  "SMUGGLED"
+
+(* Httpz will reject this with Ambiguous_framing *)
+```
+
+## Header Injection Prevention
+
+Prevents CRLF injection attacks in response headers:
+
+```ocaml
+(* Validate user input before using in headers *)
+let safe_header_value value =
+  (* Check for CRLF sequences *)
+  if String.contains value '\r' || String.contains value '\n' then
+    Error `Invalid_header_value
+  else
+    Ok value
+
+let set_custom_header buf ~off name value =
+  match safe_header_value value with
+  | Ok safe_value ->
+    Res.write_header buf ~off name safe_value
+  | Error `Invalid_header_value ->
+    (* Reject or sanitize *)
+    off  (* Don't write header *)
+```
+
+<Warning>
+  Always validate user-controlled data before including it in response headers. Never trust client input.
+</Warning>
+
+## Connection Management
+
+Secure connection handling:
+
+```ocaml
+let handle_connection socket =
+  let keep_alive = ref true in
+  
+  while !keep_alive do
+    match parse_and_handle_request socket with
+    | `Success req ->
+      keep_alive := req.#keep_alive
+    
+    | `Security_violation ->
+      (* Always close on security violations *)
+      keep_alive := false
+    
+    | `Error ->
+      keep_alive := false
+  done;
+  
+  close_connection socket
+```
+
+## Best Practices
+
+1. **Always check parse status**: Never assume `Complete` status
+
+2. **Close on security violations**: Don't attempt to recover from Bare_cr_detected or Ambiguous_framing
+
+3. **Configure appropriate limits**: Adjust limits based on your use case:
+   - Public APIs: Strict limits (10MB, 50 headers)
+   - Internal services: Relaxed limits (100MB, 200 headers)
+   - File uploads: Higher Content-Length limits
+
+4. **Log security events**: Track and monitor security violations
+
+5. **Validate all input**: Never trust user-provided data in headers or URIs
+
+6. **Use HTTPS**: Httpz handles HTTP/1.1 parsing; always use TLS for transport security
+
+7. **Keep connection state**: Track violations per IP for rate limiting
+
+8. **Update limits dynamically**: Adjust based on observed attack patterns
+
+## Security Status Reference
+
+| Status | Severity | Action | Close Connection |
+|--------|----------|--------|------------------|
+| `Bare_cr_detected` | Critical | 400 Bad Request | Yes |
+| `Ambiguous_framing` | Critical | 400 Bad Request | Yes |
+| `Content_length_overflow` | High | 413 Payload Too Large | Yes |
+| `Headers_too_large` | High | 413 Payload Too Large | Recommended |
+| `Unsupported_transfer_encoding` | Medium | 501 Not Implemented | No |
+| `Missing_host_header` | Low | 400 Bad Request | No |
+
+## See Also
+
+- [Parsing Requests](/guides/parsing-requests) - Request parsing basics
+- [Chunked Encoding](/guides/chunked-encoding) - Chunk size limits
+- [RFC 7230](https://datatracker.ietf.org/doc/html/rfc7230) - HTTP/1.1 Message Syntax and Routing
+- [RFC 7232](https://datatracker.ietf.org/doc/html/rfc7232) - HTTP/1.1 Conditional Requests

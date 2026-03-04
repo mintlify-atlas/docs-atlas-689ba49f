@@ -1,0 +1,269 @@
+---
+title: Req
+description: HTTP request type and body helper functions
+---
+
+The `Req` module provides the core HTTP request type and utilities for working with request bodies.
+
+## Type Definition
+
+### `t`
+
+```ocaml
+type t =
+  #{ meth : Method.t
+   ; target : Span.t
+   ; version : Version.t
+   ; body_off : int16#
+   ; content_length : int64#
+   ; is_chunked : bool
+   ; keep_alive : bool
+   ; expect_continue : bool
+   }
+```
+
+Unboxed request record. Content headers (`Content-Length`, `Transfer-Encoding`, `Connection`, `Expect`) are parsed during header parsing and cached in this structure; they are excluded from the returned header list.
+
+<ResponseField name="meth" type="Method.t">
+  HTTP request method (GET, POST, etc.)
+</ResponseField>
+
+<ResponseField name="target" type="Span.t">
+  Request target (URI/path) as a span into the buffer
+</ResponseField>
+
+<ResponseField name="version" type="Version.t">
+  HTTP version (HTTP/1.0 or HTTP/1.1)
+</ResponseField>
+
+<ResponseField name="body_off" type="int16#">
+  Offset in buffer where request body starts
+</ResponseField>
+
+<ResponseField name="content_length" type="int64#">
+  Content-Length value, or `-1L` if not present
+</ResponseField>
+
+<ResponseField name="is_chunked" type="bool">
+  `true` if Transfer-Encoding: chunked is present
+</ResponseField>
+
+<ResponseField name="keep_alive" type="bool">
+  `true` for keep-alive connections (considers HTTP version default)
+</ResponseField>
+
+<ResponseField name="expect_continue" type="bool">
+  `true` if Expect: 100-continue is present per [RFC 7231 Section 5.1.1](https://datatracker.ietf.org/doc/html/rfc7231#section-5.1.1)
+</ResponseField>
+
+## Functions
+
+### `body_in_buffer`
+
+```ocaml
+val body_in_buffer : len:int16# -> t @ local -> bool
+```
+
+Check if the complete body is available in the buffer.
+
+<ParamField path="len" type="int16#">
+  Current length of data in the buffer
+</ParamField>
+
+<ParamField path="req" type="t @ local">
+  The request to check
+</ParamField>
+
+**Returns:** `true` if `body_off + content_length <= len`, or if there's no body. Returns `false` for chunked encoding.
+
+**Example:**
+
+```ocaml
+let req = Parser.parse_request buf in
+let buf_len = Span.of_int (Bigstring.length buf) in
+if Req.body_in_buffer ~len:buf_len req then
+  (* Body is complete, can process it *)
+  process_request req buf
+else
+  (* Need to read more data *)
+  read_more_data ()
+```
+
+### `body_span`
+
+```ocaml
+val body_span : len:int16# -> t @ local -> Span.t
+```
+
+Get span of body if fully in buffer.
+
+<ParamField path="len" type="int16#">
+  Current length of data in the buffer
+</ParamField>
+
+<ParamField path="req" type="t @ local">
+  The request to get body span from
+</ParamField>
+
+**Returns:** Span pointing to the body data. Returns span with `len = -1` if body is incomplete or uses chunked encoding (use `Chunk.parse` for chunked bodies).
+
+**Example:**
+
+```ocaml
+let body = Req.body_span ~len:buf_len req in
+if Span.len body >= 0 then
+  let body_str = Span.to_string buf body in
+  (* Process body_str *)
+  process_body body_str
+else if req.#is_chunked then
+  (* Handle chunked encoding *)
+  Chunk.parse buf
+else
+  (* Body incomplete *)
+  wait_for_more_data ()
+```
+
+### `body_bytes_needed`
+
+```ocaml
+val body_bytes_needed : len:int16# -> t @ local -> int16#
+```
+
+Returns additional bytes needed for complete body.
+
+<ParamField path="len" type="int16#">
+  Current length of data in the buffer
+</ParamField>
+
+<ParamField path="req" type="t @ local">
+  The request to check
+</ParamField>
+
+**Returns:** 
+- `0` if body is complete
+- Number of additional bytes needed if incomplete
+- `-1` for chunked encoding (unknown length)
+
+**Example:**
+
+```ocaml
+let needed = Req.body_bytes_needed ~len:buf_len req in
+if Span.to_int needed = 0 then
+  (* Body complete *)
+  process_complete_body req buf
+else if Span.to_int needed < 0 then
+  (* Chunked encoding - length unknown *)
+  handle_chunked_body req buf
+else
+  (* Need to read 'needed' more bytes *)
+  read_exactly (Span.to_int needed)
+```
+
+### `pp_with_buf`
+
+```ocaml
+val pp_with_buf : Base_bigstring.t -> Stdlib.Format.formatter -> t -> unit
+```
+
+Pretty-print request line using buffer (shows actual values).
+
+<ParamField path="buf" type="Base_bigstring.t">
+  Buffer containing the request data
+</ParamField>
+
+<ParamField path="fmt" type="Stdlib.Format.formatter">
+  Formatter to write output to
+</ParamField>
+
+<ParamField path="req" type="t">
+  Request to print
+</ParamField>
+
+**Example:**
+
+```ocaml
+(* Prints: "GET /api/users HTTP/1.1" *)
+Req.pp_with_buf buf Format.std_formatter req
+```
+
+### `pp`
+
+```ocaml
+val pp : Stdlib.Format.formatter -> t -> unit
+```
+
+Pretty-print request structure (shows field values without buffer).
+
+<ParamField path="fmt" type="Stdlib.Format.formatter">
+  Formatter to write output to
+</ParamField>
+
+<ParamField path="req" type="t">
+  Request to print
+</ParamField>
+
+**Example:**
+
+```ocaml
+(* Prints the record structure with all fields *)
+Req.pp Format.std_formatter req
+(* Output: #{ meth = GET; target = #{ off = 4; len = 10 }; ... } *)
+```
+
+## Usage Examples
+
+### Basic Request Handling
+
+```ocaml
+open Httpz
+
+let handle_request buf =
+  match Parser.parse_request buf with
+  | Error err -> handle_error err
+  | Ok (req, headers) ->
+      let buf_len = Span.of_int (Bigstring.length buf) in
+      
+      (* Check if body is complete *)
+      if Req.body_in_buffer ~len:buf_len req then
+        let body = Req.body_span ~len:buf_len req in
+        process_complete_request req headers body
+      else
+        (* Need more data *)
+        let needed = Req.body_bytes_needed ~len:buf_len req in
+        await_more_data needed
+```
+
+### Handling Different Body Types
+
+```ocaml
+let process_body buf req =
+  if req.#is_chunked then
+    (* Handle chunked transfer encoding *)
+    Chunk.parse buf ~off:req.#body_off
+  else if Int64_u.compare req.#content_length #0L > 0 then
+    (* Handle fixed-length body *)
+    let body = Req.body_span ~len:(get_buf_len ()) req in
+    if Span.len body >= 0 then
+      Some (Span.to_string buf body)
+    else
+      None (* Incomplete *)
+  else
+    (* No body *)
+    Some ""
+```
+
+### Checking for Expect: 100-continue
+
+```ocaml
+let handle_expect_continue buf req =
+  if req.#expect_continue then
+    (* Client expects 100 Continue response before sending body *)
+    let off = Span.of_int 0 in
+    let off = Res.write_status_line buf ~off Res.Continue req.#version in
+    let off = Res.write_crlf buf ~off in
+    (* Send the 100 Continue response, then wait for body *)
+    send_response buf ~len:off
+  else
+    (* No expectation, proceed normally *)
+    process_request req
+```

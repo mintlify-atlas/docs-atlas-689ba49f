@@ -1,0 +1,275 @@
+---
+title: Architecture
+description: Deep dive into httpz's zero-allocation HTTP/1.1 parser design
+---
+
+## Overview
+
+httpz is a zero-allocation HTTP/1.1 parser for OxCaml that achieves exceptional performance through careful architectural choices. The parser processes HTTP requests without any heap allocations by leveraging OxCaml's unboxed types, stack-allocated data structures, and span-based parsing.
+
+## Core Design Principles
+
+### 1. Buffer Reuse Strategy
+
+httpz uses a fixed 32KB pre-allocated buffer that is reused across all requests:
+
+```ocaml
+(* buf_read.ml:44 *)
+let buffer_size = 32768
+let create () = Base_bigstring.create buffer_size
+```
+
+This buffer is allocated once and reused indefinitely, eliminating per-request allocation overhead. The 32KB size accommodates most HTTP requests while staying within reasonable memory bounds.
+
+### 2. Span-Based Parsing
+
+Instead of copying strings from the buffer, httpz uses **spans** - lightweight references into the buffer:
+
+```ocaml
+(* span.ml:10-13 *)
+type t =
+  #{ off : int16#
+   ; len : int16#
+   }
+```
+
+Spans are unboxed records containing only an offset and length (both as `int16#`). Since the max buffer size is 32KB, `int16#` is sufficient and avoids the overhead of boxed integers.
+
+**Example usage:**
+
+```ocaml
+(* parser.ml:157-162 *)
+let[@inline] parse_target st ~(pos : int16#) : #(Span.t * int16#) =
+  let #(sp, pos) = take_while (fun c ->
+    Buf_read.( <>. ) c #' ' && Buf_read.( <>. ) c #'\r') st ~pos
+  in
+  Err.when_ (Span.len sp = 0) Err.Invalid_target;
+  #(sp, pos)
+```
+
+### 3. Parser Combinator Approach
+
+httpz implements a parser combinator library where position is threaded explicitly:
+
+```ocaml
+(* parser.ml:10-11 *)
+type pstate = #{ buf : Base_bigstring.t; len : int16# }
+```
+
+Every combinator follows the pattern:
+
+```ocaml
+val combinator : pstate -> pos:int16# -> #(result * int16#)
+```
+
+The combinator takes the current position, performs parsing, and returns both the result and the new position. This explicit position threading eliminates the need for mutable state.
+
+**Example combinators:**
+
+```ocaml
+(* parser.ml:43-46 *)
+let[@inline] char (c : char#) st ~(pos : int16#) : int16# =
+  Err.partial_when @@ at_end st ~pos;
+  Err.malformed_when @@ Buf_read.( <>. ) (Buf_read.peek st.#buf pos) c;
+  add16 pos one16
+
+(* parser.ml:48-57 *)
+let[@inline] string (s : string) st ~(pos : int16#) : int16# =
+  let slen = String.length s in
+  Err.partial_when (to_int (remaining st ~pos) < slen);
+  for i = 0 to slen - 1 do
+    let actual = Buf_read.peek st.#buf (add16 pos (i16 i)) in
+    let expected = Stdlib_stable.Char_u.of_char (String.unsafe_get s i) in
+    Err.malformed_when @@ Buf_read.( <>. ) actual expected
+  done;
+  add16 pos (i16 slen)
+```
+
+### 4. Request Parsing Flow
+
+The complete request parsing follows this sequence:
+
+```ocaml
+(* httpz.ml:172-188 *)
+let parse buf ~(len : int16#) ~limits = exclave_
+  let open Buf_read in
+  if to_int len > buffer_size || gt16 len limits.#max_header_size then
+    error_result Headers_too_large
+  else
+    try
+      let pst = Parser.make buf ~len in
+      let #(meth, target, version, pos) = Parser.request_line pst ~pos:(i16 0) in
+      let #(body_off, st, headers) =
+        parse_headers_loop pst ~pos ~acc:[] initial_header_state ~limits
+      in
+      (* Only missing Host header needs end-of-parse check *)
+      match (version, st.#has_host) with
+      | (Version.Http_1_1, false) -> error_result Missing_host_header
+      | _ -> build_request ~meth ~target ~version ~body_off st ~headers
+    with Err.Parse_error status ->
+      error_result status
+```
+
+**Step-by-step:**
+
+1. **Validate buffer size** against limits
+2. **Parse request line** (method, target, version)
+3. **Parse headers** in a loop, accumulating to a local list
+4. **Validate HTTP/1.1 requirements** (Host header)
+5. **Build request struct** with all parsed data
+
+### 5. Header Parsing State
+
+During header parsing, httpz maintains state in an unboxed record:
+
+```ocaml
+(* httpz.ml:55-64 *)
+type header_state =
+ #{ count : int16#
+  ; content_len : int64#
+  ; chunked : bool
+  ; conn : conn_value
+  ; has_cl : bool
+  ; has_te : bool
+  ; has_host : bool
+  ; expect_continue : bool
+  }
+```
+
+This state is updated functionally (not mutated) as headers are parsed:
+
+```ocaml
+(* httpz.ml:136-144 *)
+match name with
+| Header_name.Content_length ->
+  Err.when_ st.#has_te Err.Ambiguous_framing;
+  let #(parsed_len, overflow) =
+    Span.parse_int64_limited pst.#buf value_span ~max_value:limits.#max_content_length
+  in
+  Err.when_ overflow Err.Content_length_overflow;
+  parse_headers_loop pst ~pos ~acc ~limits
+    #{ st with count = next_count; content_len = parsed_len; has_cl = true }
+```
+
+### 6. Local Lists for Headers
+
+Headers are accumulated in a **local list** that lives on the stack:
+
+```ocaml
+(* httpz.ml:123 *)
+let rec parse_headers_loop (pst : Parser.pstate) ~pos ~acc (st : header_state) ~limits
+  : #(int16# * header_state * Header.t list) = exclave_
+```
+
+The `exclave_` annotation indicates the function returns stack-allocated values. Headers are prepended to the accumulator:
+
+```ocaml
+(* httpz.ml:164-167 *)
+| _ ->
+  let hdr = { Header.name; name_span; value = value_span } in
+  parse_headers_loop pst ~pos ~acc:(hdr :: acc) ~limits
+    #{ st with count = next_count }
+```
+
+## Security Features
+
+httpz includes comprehensive RFC 7230 validation:
+
+### Configurable Limits
+
+```ocaml
+(* buf_read.ml:103-115 *)
+type limits =
+  #{ max_content_length : int64#  (* Default: 100MB *)
+   ; max_header_size : int16#     (* Default: 16KB *)
+   ; max_header_count : int16#    (* Default: 100 *)
+   ; max_chunk_size : int         (* Default: 16MB *)
+   }
+
+let default_limits =
+  #{ max_content_length = #104857600L
+   ; max_header_size = i16 16384
+   ; max_header_count = i16 100
+   ; max_chunk_size = 16777216
+   }
+```
+
+### HTTP Smuggling Prevention
+
+```ocaml
+(* buf_read.ml:119-135 *)
+let[@inline] has_bare_cr (local_ buf) ~(pos : int16#) ~(len : int16#) =
+  let pos = to_int pos in
+  let len = to_int len in
+  let end_pos = pos + len in
+  let mutable p = pos in
+  let mutable found = false in
+  while (not found) && p < end_pos do
+    if peek buf (i16 p) =. #'\r' then (
+      if p + 1 >= end_pos || peek buf (i16 (p + 1)) <>. #'\n' then
+        found <- true
+      else
+        p <- p + 2
+    ) else
+      p <- p + 1
+  done;
+  found
+```
+
+### Ambiguous Framing Detection
+
+```ocaml
+(* httpz.ml:137-138 *)
+| Header_name.Content_length ->
+  Err.when_ st.#has_te Err.Ambiguous_framing;
+
+(* httpz.ml:145-146 *)
+| Header_name.Transfer_encoding ->
+  Err.when_ st.#has_cl Err.Ambiguous_framing;
+```
+
+## Chunked Transfer Encoding
+
+httpz supports chunked encoding with overflow protection:
+
+```ocaml
+(* chunk.ml:55-83 *)
+let[@inline] parse_hex_size_limited buf ~off ~len ~max_size =
+  let module P = Buf_read in
+  let mutable pos = off in
+  let mutable size = 0 in
+  let mutable valid = true in
+  let mutable overflow = false in
+  let mutable digit_count = 0 in
+  while valid && pos < len do
+    let digit = hex_digit_value (P.peek buf (i16 pos)) in
+    if digit >= 0 then (
+      digit_count <- digit_count + 1;
+      if digit_count > to_int max_hex_digits then (
+        overflow <- true;
+        valid <- false
+      ) else (
+        let new_size = (size * 16) + digit in
+        if new_size > max_size then (
+          overflow <- true;
+          valid <- false
+        ) else (
+          size <- new_size;
+          pos <- pos + 1
+        )
+      )
+    ) else
+      valid <- false
+  done;
+  #(size, pos, overflow)
+```
+
+## Performance Characteristics
+
+- **Parsing throughput**: 6.5M requests/sec
+- **Minimal request (35B)**: 300ns, 0 heap allocations
+- **Simple request (4 headers)**: 925ns, 0 heap allocations
+- **Browser request (10 headers)**: 3.3μs, 0 heap allocations
+- **50 headers**: 11.2μs, 0 heap allocations
+
+The architecture enables true zero-allocation parsing across all request sizes.

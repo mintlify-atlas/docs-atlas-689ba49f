@@ -1,0 +1,512 @@
+---
+title: 'Unboxed Types'
+description: 'Understanding OxCaml unboxed types and how httpz leverages them for zero-allocation parsing'
+---
+
+## What Are Unboxed Types?
+
+In standard OCaml, most values are **boxed** - stored as pointers to heap-allocated memory. OxCaml introduces **unboxed types** that store values directly without indirection, enabling stack allocation and eliminating GC pressure.
+
+### Boxed vs Unboxed
+
+**Boxed (Standard OCaml):**
+```ocaml
+type point = { x : int; y : int }
+(* Stored as: pointer -> [tag | x_ptr | y_ptr] -> [x_value] [y_value] *)
+(* Memory: 1 word (pointer) + 3 words (record) + 2 words (ints) = 6 words *)
+```
+
+**Unboxed (OxCaml):**
+```ocaml
+type point = #{ x : int; y : int }
+(* Stored as: [x_value | y_value] directly on stack *)
+(* Memory: 2 words, no heap allocation *)
+```
+
+## Unboxed Types in httpz
+
+httpz extensively uses three categories of unboxed types:
+
+### 1. Unboxed Primitives
+
+#### int16# - 16-bit Unboxed Integer
+
+Used for all buffer offsets, lengths, and positions since httpz's max buffer is 32KB:
+
+```ocaml
+(* span.ml:10-13 *)
+type t =
+  #{ off : int16#
+   ; len : int16#
+   }
+```
+
+**Arithmetic operations:**
+
+```ocaml
+(* parser.ml:5-19 *)
+module I16 = Stdlib_stable.Int16_u
+
+let[@inline always] add16 a b = I16.add a b
+let[@inline always] sub16 a b = I16.sub a b
+let[@inline always] gte16 a b = I16.compare a b >= 0
+let[@inline always] lt16 a b = I16.compare a b < 0
+let[@inline always] i16 x = I16.of_int x
+let[@inline always] to_int x = I16.to_int x
+let one16 : int16# = i16 1
+```
+
+**Usage in combinators:**
+
+```ocaml
+(* parser.ml:76-79 *)
+let[@inline] take (n : int16#) st ~(pos : int16#) : #(Span.t * int16#) =
+  Err.partial_when @@ lt16 (remaining st ~pos) n;
+  #(Span.make ~off:pos ~len:n, add16 pos n)
+```
+
+#### int64# - 64-bit Unboxed Integer
+
+Used for content lengths which can exceed 32-bit range:
+
+```ocaml
+(* req.ml:12-21 *)
+type t =
+  #{ meth : Method.t
+   ; target : Span.t
+   ; version : Version.t
+   ; body_off : int16#
+   ; content_length : int64#
+   ; is_chunked : bool
+   ; keep_alive : bool
+   ; expect_continue : bool
+   }
+```
+
+**Parsing int64 from spans:**
+
+```ocaml
+(* span.ml:63-82 *)
+let[@inline] parse_int64 (local_ buf) (sp : t) : int64# =
+  let sp_len = len sp in
+  if sp_len = 0
+  then minus_one_i64
+  else (
+    let mutable acc : int64# = #0L in
+    let mutable i = 0 in
+    let mutable valid = true in
+    let sp_off = off sp in
+    while valid && i < sp_len do
+      let c = Buf_read.peek buf (I16.of_int (sp_off + i)) in
+      match c with
+      | #'0' .. #'9' ->
+        let digit = I64.of_int (Char_u.code c - 48) in
+        acc <- I64.add (I64.mul acc #10L) digit;
+        i <- i + 1
+      | _ -> valid <- false
+    done;
+    if i = 0 then minus_one_i64 else acc)
+```
+
+**Overflow protection:**
+
+```ocaml
+(* span.ml:88-121 *)
+let[@inline] parse_int64_limited (local_ buf) (sp : t) ~(max_value : int64#) : #(int64# * bool) =
+  let sp_len = len sp in
+  if sp_len = 0 then #(minus_one_i64, false)
+  else if sp_len > 19 then #(minus_one_i64, true)  (* int64 max is 19 digits *)
+  else (
+    let mutable acc : int64# = #0L in
+    let mutable i = 0 in
+    let mutable valid = true in
+    let mutable overflow = false in
+    let sp_off = off sp in
+    while valid && i < sp_len do
+      let c = Buf_read.peek buf (I16.of_int (sp_off + i)) in
+      match c with
+      | #'0' .. #'9' ->
+        let digit = I64.of_int (Char_u.code c - 48) in
+        let new_acc = I64.add (I64.mul acc #10L) digit in
+        if I64.compare new_acc acc < 0 then (
+          overflow <- true;
+          valid <- false
+        ) else if I64.compare new_acc max_value > 0 then (
+          overflow <- true;
+          valid <- false
+        ) else (
+          acc <- new_acc;
+          i <- i + 1
+        )
+      | _ -> valid <- false
+    done;
+    if i = 0 then #(minus_one_i64, false)
+    else if overflow then #(minus_one_i64, true)
+    else #(acc, false)
+  )
+```
+
+#### char# - Unboxed Character
+
+Used throughout for character comparisons without boxing:
+
+```ocaml
+(* buf_read.ml:52-55 *)
+let[@inline always] peek (local_ buf) (pos : int16#) : char# =
+  char_u (Base_bigstring.unsafe_get buf (to_int pos))
+let[@inline always] ( =. ) (a : char#) (b : char#) = Char_u.equal a b
+let[@inline always] ( <>. ) (a : char#) (b : char#) = not (Char_u.equal a b)
+```
+
+**Pattern matching:**
+
+```ocaml
+(* buf_read.ml:57-63 *)
+let[@inline always] is_token_char (c : char#) =
+  match c with
+  | #'a' .. #'z' | #'A' .. #'Z' | #'0' .. #'9' -> true
+  | #'!' | #'#' | #'$' | #'%' | #'&' | #'\'' | #'*' | #'+' | #'-' | #'.' -> true
+  | #'^' | #'_' | #'`' | #'|' | #'~' -> true
+  | _ -> false
+```
+
+**Case conversion:**
+
+```ocaml
+(* buf_read.ml:71-75 *)
+let[@inline always] to_lower (c : char#) : char# =
+  match c with
+  | #'A' .. #'Z' -> Char_u.chr (Char_u.code c + 32)
+  | _ -> c
+```
+
+### 2. Unboxed Records
+
+Records defined with `#{...}` are allocated on the stack:
+
+#### Parser State
+
+```ocaml
+(* parser.ml:10-11 *)
+type pstate = #{ buf : Base_bigstring.t; len : int16# }
+```
+
+This state is threaded through all parser combinators without allocation.
+
+#### Span Type
+
+```ocaml
+(* span.ml:10-13 *)
+type t =
+  #{ off : int16#
+   ; len : int16#
+   }
+```
+
+Spans are returned from parsers as part of unboxed tuples:
+
+```ocaml
+(* parser.ml:60-66 *)
+let[@inline] take_while (f : char# -> bool) st ~(pos : int16#) : #(Span.t * int16#) =
+  let start = pos in
+  let mutable p = pos in
+  while not (at_end st ~pos:p) && f (Buf_read.peek st.#buf p) do
+    p <- add16 p one16
+  done;
+  #(Span.make ~off:start ~len:(sub16 p start), p)
+```
+
+#### Request Type
+
+```ocaml
+(* req.ml:12-21 *)
+type t =
+  #{ meth : Method.t
+   ; target : Span.t
+   ; version : Version.t
+   ; body_off : int16#
+   ; content_length : int64#
+   ; is_chunked : bool
+   ; keep_alive : bool
+   ; expect_continue : bool
+   }
+```
+
+Accessing fields uses `.#` syntax:
+
+```ocaml
+(* req.ml:25-32 *)
+let[@inline] body_bounds ~(len : int16#) (req : t @ local) =
+  let cl = req.#content_length in
+  let buf_len = to_int len in
+  if I64.compare cl #0L <= 0 then None
+  else
+    let body_len = I64.to_int cl in
+    let body_end = to_int req.#body_off + body_len in
+    Some (body_len, body_end, body_end <= buf_len)
+```
+
+#### Header State
+
+```ocaml
+(* httpz.ml:55-64 *)
+type header_state =
+ #{ count : int16#
+  ; content_len : int64#
+  ; chunked : bool
+  ; conn : conn_value
+  ; has_cl : bool
+  ; has_te : bool
+  ; has_host : bool
+  ; expect_continue : bool
+  }
+```
+
+Functional updates use `with` syntax:
+
+```ocaml
+(* httpz.ml:143-144 *)
+parse_headers_loop pst ~pos ~acc ~limits
+  #{ st with count = next_count; content_len = parsed_len; has_cl = true }
+```
+
+#### Chunk Type
+
+```ocaml
+(* chunk.ml:27-31 *)
+type t =
+  #{ data_off : int16#
+   ; data_len : int16#
+   ; next_off : int16#
+   }
+```
+
+#### Limits Configuration
+
+```ocaml
+(* buf_read.ml:103-108 *)
+type limits =
+  #{ max_content_length : int64#
+   ; max_header_size : int16#
+   ; max_header_count : int16#
+   ; max_chunk_size : int
+   }
+```
+
+### 3. Unboxed Tuples
+
+Tuples with `#(...)` syntax are stack-allocated and commonly used for parser return values:
+
+**Returning span and position:**
+
+```ocaml
+(* parser.ml:112-115 *)
+let[@inline] token st ~(pos : int16#) : #(Span.t * int16#) =
+  let #(sp, pos) = take_while Buf_read.is_token_char st ~pos in
+  Err.malformed_when (Span.len sp = 0);
+  #(sp, pos)
+```
+
+**Returning multiple values:**
+
+```ocaml
+(* parser.ml:165-172 *)
+let[@inline] request_line st ~(pos : int16#) : #(Method.t * Span.t * Version.t * int16#) =
+  let #(meth, pos) = parse_method st ~pos in
+  let pos = sp st ~pos in
+  let #(target, pos) = parse_target st ~pos in
+  let pos = sp st ~pos in
+  let #(version, pos) = http_version st ~pos in
+  let pos = crlf st ~pos in
+  #(meth, target, version, pos)
+```
+
+**Returning header info:**
+
+```ocaml
+(* parser.ml:176-196 *)
+let[@inline] parse_header st ~(pos : int16#) : #(Header_name.t * Span.t * Span.t * int16#) =
+  let #(name_span, pos) = token st ~pos in
+  let pos = char #':' st ~pos in
+  let pos = ows st ~pos in
+  let value_start = pos in
+  let crlf_pos = Buf_read.find_crlf st.#buf ~pos ~len:st.#len in
+  Err.partial_when (to_int crlf_pos < 0);
+  let mutable value_end = crlf_pos in
+  while I16.compare value_end value_start > 0 &&
+        Buf_read.is_space (Buf_read.peek st.#buf (sub16 value_end one16)) do
+    value_end <- sub16 value_end one16
+  done;
+  let value_span = Span.make
+    ~off:value_start
+    ~len:(sub16 value_end value_start)
+  in
+  let pos = add16 crlf_pos (i16 2) in
+  let name = Header_name.of_span st.#buf name_span in
+  #(name, name_span, value_span, pos)
+```
+
+**Complete parse result:**
+
+```ocaml
+(* httpz.ml:80-92 *)
+let[@inline] error_result status = exclave_
+  #( status
+   , #{ Req.meth = Method.Get
+      ; target = Span.make ~off:(i16 0) ~len:(i16 0)
+      ; version = Version.Http_1_1
+      ; body_off = i16 0
+      ; content_length = minus_one_i64
+      ; is_chunked = false
+      ; keep_alive = true
+      ; expect_continue = false
+      }
+   , ([] : Header.t list) )
+```
+
+## Local Allocations
+
+OxCaml's `@ local` mode annotation enables stack allocation of normally heap-allocated values:
+
+### Local Lists
+
+Header lists are accumulated on the stack:
+
+```ocaml
+(* httpz.ml:123-124 *)
+let rec parse_headers_loop (pst : Parser.pstate) ~pos ~acc (st : header_state) ~limits
+  : #(int16# * header_state * Header.t list) = exclave_
+```
+
+The `exclave_` annotation indicates the function returns local values that must not escape to the heap.
+
+### Local Parameters
+
+Functions can accept local parameters:
+
+```ocaml
+(* span.ml:30-36 *)
+let[@inline] equal (local_ buf) (sp : t) s =
+  let slen = String.length s in
+  let sp_len = len sp in
+  if sp_len <> slen
+  then false
+  else Base_bigstring.memcmp_string buf ~pos1:(off sp) s ~pos2:0 ~len:slen = 0
+```
+
+The `local_` annotation on `buf` indicates it's borrowed from the caller's stack frame.
+
+## Performance Benefits
+
+### Memory Layout Comparison
+
+**Boxed Span (Standard OCaml):**
+- Pointer to span: 1 word (8 bytes)
+- Span header: 1 word (tag)
+- Offset field: 1 word (boxed int) -> 2 words (pointer + value)
+- Length field: 1 word (boxed int) -> 2 words (pointer + value)
+- **Total: 7 words (56 bytes)** on heap
+
+**Unboxed Span (httpz):**
+- Offset: 2 bytes (int16#)
+- Length: 2 bytes (int16#)
+- **Total: 4 bytes** on stack
+
+**Savings: 14x smaller, zero heap allocation**
+
+### Request Struct Comparison
+
+**Boxed (Standard OCaml):**
+- ~20 words on heap for Request record
+- ~10 words per header
+- Header list pointers: ~2 words per cons cell
+- **Typical request: 50-100+ words on heap**
+
+**Unboxed (httpz):**
+- Request: ~10 words on stack
+- Headers: ~8 words per header on stack
+- **Typical request: 0 words on heap, 80-160 words on stack**
+
+### GC Impact
+
+With boxed types:
+- Every request creates 50-100+ words of garbage
+- At 1M req/s: 50-100 GB/s allocation rate
+- Major GC collections every few seconds
+- Unpredictable latency spikes
+
+With unboxed types:
+- **0 bytes allocated on heap**
+- No GC pressure from parsing
+- Predictable, consistent latency
+- Linear performance scaling
+
+## Best Practices
+
+### 1. Use int16# for Small Values
+
+When values fit in 16 bits, prefer `int16#` over regular `int`:
+
+```ocaml
+(* Good *)
+type state = #{ count : int16#; offset : int16# }
+
+(* Wasteful *)
+type state = #{ count : int; offset : int }  (* 2x memory, boxed *)
+```
+
+### 2. Return Unboxed Tuples
+
+When returning multiple values, use unboxed tuples:
+
+```ocaml
+(* Good *)
+val parse : buffer -> pos:int16# -> #(result * int16#)
+
+(* Allocates *)
+val parse : buffer -> pos:int -> result * int
+```
+
+### 3. Thread Position Explicitly
+
+Avoid mutable position by threading it through function returns:
+
+```ocaml
+(* Good - zero allocation *)
+let parse_line buf ~pos =
+  let #(tok1, pos) = token buf ~pos in
+  let pos = space buf ~pos in
+  let #(tok2, pos) = token buf ~pos in
+  #(tok1, tok2, pos)
+
+(* Bad - requires mutable ref *)
+let parse_line buf pos_ref =
+  let tok1 = token buf !pos_ref in
+  pos_ref := !pos_ref + 1;
+  let tok2 = token buf !pos_ref in
+  (tok1, tok2)
+```
+
+### 4. Use Spans Instead of Strings
+
+Reference into buffers instead of copying:
+
+```ocaml
+(* Good - zero allocation *)
+type header = { name : Span.t; value : Span.t }
+
+(* Bad - allocates strings *)
+type header = { name : string; value : string }
+```
+
+### 5. Mark Functions with exclave_
+
+When returning local values, use `exclave_`:
+
+```ocaml
+let parse_headers buf ~pos ~acc = exclave_
+  (* ... returns local list *)
+  #(pos', headers)
+```
+
+This ensures the compiler verifies local values don't escape to the heap.

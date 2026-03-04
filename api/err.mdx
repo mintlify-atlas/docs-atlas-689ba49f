@@ -1,0 +1,358 @@
+---
+title: "Err"
+description: "Error handling combinators for HTTP parsing"
+---
+
+The `Err` module provides zero-cost abstractions for raising parse errors with various status codes. All functions are inlined for performance, making error handling both ergonomic and efficient.
+
+## Status Type
+
+<ResponseField name="status" type="variant">
+  Parse status enumeration (re-exported from `Buf_read.status`).
+
+  <ResponseField name="Complete" type="variant">
+    Parsing completed successfully
+  </ResponseField>
+
+  <ResponseField name="Partial" type="variant">
+    Need more input data to continue parsing
+  </ResponseField>
+
+  <ResponseField name="Invalid_method" type="variant">
+    HTTP method is invalid or unsupported
+  </ResponseField>
+
+  <ResponseField name="Invalid_target" type="variant">
+    Request target (URI) is malformed
+  </ResponseField>
+
+  <ResponseField name="Invalid_version" type="variant">
+    HTTP version is invalid or unsupported
+  </ResponseField>
+
+  <ResponseField name="Invalid_header" type="variant">
+    Header name or value is malformed
+  </ResponseField>
+
+  <ResponseField name="Headers_too_large" type="variant">
+    Headers exceed maximum allowed size
+  </ResponseField>
+
+  <ResponseField name="Malformed" type="variant">
+    General protocol format violation
+  </ResponseField>
+
+  <ResponseField name="Content_length_overflow" type="variant">
+    Content-Length value exceeds maximum allowed
+  </ResponseField>
+
+  <ResponseField name="Ambiguous_framing" type="variant">
+    Both Content-Length and Transfer-Encoding present
+  </ResponseField>
+
+  <ResponseField name="Bare_cr_detected" type="variant">
+    Bare CR found (security violation)
+  </ResponseField>
+
+  <ResponseField name="Missing_host_header" type="variant">
+    Required Host header is missing (HTTP/1.1)
+  </ResponseField>
+
+  <ResponseField name="Unsupported_transfer_encoding" type="variant">
+    Transfer-Encoding other than chunked is not supported
+  </ResponseField>
+</ResponseField>
+
+## Exception
+
+### `Parse_error`
+
+```ocaml
+exception Parse_error of status
+```
+
+Parse error exception with detailed status information.
+
+**Example:**
+
+```ocaml
+try
+  parse_request buffer
+with
+| Err.Parse_error status ->
+  match status with
+  | Invalid_method -> respond_with 400 "Bad Request"
+  | Headers_too_large -> respond_with 431 "Request Header Fields Too Large"
+  | Content_length_overflow -> respond_with 413 "Payload Too Large"
+  | _ -> respond_with 400 "Bad Request"
+```
+
+## Direct Fail Combinators
+
+These functions immediately raise a `Parse_error` with the specified status.
+
+### `fail`
+
+```ocaml
+val fail : status -> 'a
+```
+
+Raise `Parse_error` with the given status.
+
+<ParamField path="status" type="status" required>
+  The error status to raise
+</ParamField>
+
+**Example:**
+
+```ocaml
+if not (is_valid_method method_str) then
+  Err.fail Invalid_method
+```
+
+### `partial`
+
+```ocaml
+val partial : unit -> 'a
+```
+
+Raise `Parse_error Partial`. Use when more input is needed.
+
+**Example:**
+
+```ocaml
+if pos + 4 > buffer_length then
+  Err.partial ()
+```
+
+### `malformed`
+
+```ocaml
+val malformed : unit -> 'a
+```
+
+Raise `Parse_error Malformed`. Use for format violations.
+
+**Example:**
+
+```ocaml
+if byte <> '\r' then
+  Err.malformed ()
+```
+
+## Conditional Raises (when condition is TRUE)
+
+These functions raise errors when the condition is true.
+
+### `when_`
+
+```ocaml
+val when_ : bool -> status -> unit
+```
+
+Raise `Parse_error status` if condition is true.
+
+<ParamField path="cond" type="bool" required>
+  Condition to check
+</ParamField>
+
+<ParamField path="status" type="status" required>
+  The error status to raise if condition is true
+</ParamField>
+
+**Example:**
+
+```ocaml
+Err.when_ (header_count > max_headers) Headers_too_large
+```
+
+### `partial_when`
+
+```ocaml
+val partial_when : bool -> unit
+```
+
+Raise `Parse_error Partial` if condition is true.
+
+<ParamField path="cond" type="bool" required>
+  Condition to check
+</ParamField>
+
+**Example:**
+
+```ocaml
+Err.partial_when (pos + needed > available)
+```
+
+### `malformed_when`
+
+```ocaml
+val malformed_when : bool -> unit
+```
+
+Raise `Parse_error Malformed` if condition is true.
+
+<ParamField path="cond" type="bool" required>
+  Condition to check
+</ParamField>
+
+**Example:**
+
+```ocaml
+Err.malformed_when (byte = '\r' && next_byte <> '\n')
+```
+
+## Guard Combinators (raise when condition is FALSE)
+
+These functions raise errors when the condition is false (i.e., they "guard" that the condition must be true).
+
+### `guard`
+
+```ocaml
+val guard : bool -> status -> unit
+```
+
+Raise `Parse_error status` if condition is false.
+
+<ParamField path="cond" type="bool" required>
+  Condition that must be true
+</ParamField>
+
+<ParamField path="status" type="status" required>
+  The error status to raise if condition is false
+</ParamField>
+
+**Example:**
+
+```ocaml
+Err.guard (version = "HTTP/1.1" || version = "HTTP/1.0") Invalid_version
+```
+
+### `partial_unless`
+
+```ocaml
+val partial_unless : bool -> unit
+```
+
+Raise `Parse_error Partial` if condition is false.
+
+Use for buffer boundary checks where you require more data.
+
+<ParamField path="cond" type="bool" required>
+  Condition that must be true (enough data available)
+</ParamField>
+
+**Example:**
+
+```ocaml
+Err.partial_unless (pos + 2 <= buffer_length)
+```
+
+### `malformed_unless`
+
+```ocaml
+val malformed_unless : bool -> unit
+```
+
+Raise `Parse_error Malformed` if condition is false.
+
+Use for validation checks where you require a condition to hold.
+
+<ParamField path="cond" type="bool" required>
+  Condition that must be true (valid format)
+</ParamField>
+
+**Example:**
+
+```ocaml
+Err.malformed_unless (byte >= '0' && byte <= '9')
+```
+
+## Recovery Combinator
+
+### `optional`
+
+```ocaml
+val optional : save:(unit -> 'pos) -> restore:('pos -> unit) -> (unit -> 'a) -> 'a or_null
+```
+
+Try to run a parser function. On success, returns the result wrapped with `Or_null.some`. On `Parse_error`, restores state using `restore (save ())` and returns `Or_null.none`.
+
+<ParamField path="save" type="unit -> 'pos" required>
+  Function to save current parser position/state
+</ParamField>
+
+<ParamField path="restore" type="'pos -> unit" required>
+  Function to restore parser position/state
+</ParamField>
+
+<ParamField path="f" type="unit -> 'a" required>
+  Parser function to attempt
+</ParamField>
+
+**Example:**
+
+```ocaml
+let optional_content_length =
+  Err.optional 
+    ~save:(fun () -> !pos)
+    ~restore:(fun p -> pos := p)
+    (fun () -> parse_content_length ())
+in
+match Or_null.to_option optional_content_length with
+| Some length -> (* Content-Length found *)
+  ...
+| None -> (* No Content-Length, continue *)
+  ...
+```
+
+## Usage Patterns
+
+### Input Validation
+
+```ocaml
+let parse_request_line buffer pos =
+  (* Ensure we have enough data *)
+  Err.partial_unless (pos + 14 <= buffer_length);
+  
+  (* Parse method *)
+  let method_end = find_space buffer pos in
+  Err.malformed_unless (method_end > pos);
+  
+  (* Validate HTTP version *)
+  let version = substring buffer version_start 8 in
+  Err.guard (version = "HTTP/1.1" || version = "HTTP/1.0") Invalid_version;
+  
+  ...
+```
+
+### Security Checks
+
+```ocaml
+let parse_content_length buffer span =
+  let max_allowed = Int64.of_int 10_000_000 in
+  let #(length, overflow) = 
+    Span.parse_int64_limited buffer span ~max_value:max_allowed in
+  
+  (* Reject if overflow or too large *)
+  Err.when_ overflow Content_length_overflow;
+  
+  (* Reject if invalid *)
+  Err.malformed_when (Int64.compare length (Int64.of_int (-1)) = 0);
+  
+  length
+```
+
+### Optional Header Parsing
+
+```ocaml
+let find_optional_header buffer headers name =
+  Err.optional
+    ~save:(fun () -> 0) (* No state to save *)
+    ~restore:(fun _ -> ()) (* No state to restore *)
+    (fun () ->
+      match find_header headers name with
+      | Some h -> h
+      | None -> Err.fail Partial (* Trigger recovery *)
+    )
+```

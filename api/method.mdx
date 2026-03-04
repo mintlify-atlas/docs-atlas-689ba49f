@@ -1,0 +1,271 @@
+---
+title: Method
+description: HTTP request method enumeration
+---
+
+The `Method` module provides the HTTP request method type and utility functions.
+
+## Type Definition
+
+### `t`
+
+```ocaml
+type t =
+  | Get
+  | Head
+  | Post
+  | Put
+  | Delete
+  | Connect
+  | Options
+  | Trace
+  | Patch
+```
+
+HTTP request method enumeration. Supports the standard HTTP methods defined in [RFC 7231](https://datatracker.ietf.org/doc/html/rfc7231#section-4) and [RFC 5789](https://datatracker.ietf.org/doc/html/rfc5789).
+
+## Method Constants
+
+<ResponseField name="Get" type="t">
+  GET method - Retrieve a resource. Safe and idempotent.
+</ResponseField>
+
+<ResponseField name="Head" type="t">
+  HEAD method - Retrieve headers only (no body). Safe and idempotent.
+</ResponseField>
+
+<ResponseField name="Post" type="t">
+  POST method - Submit data to create a resource. Not idempotent.
+</ResponseField>
+
+<ResponseField name="Put" type="t">
+  PUT method - Replace a resource. Idempotent.
+</ResponseField>
+
+<ResponseField name="Delete" type="t">
+  DELETE method - Remove a resource. Idempotent.
+</ResponseField>
+
+<ResponseField name="Connect" type="t">
+  CONNECT method - Establish a tunnel (typically for HTTPS proxying).
+</ResponseField>
+
+<ResponseField name="Options" type="t">
+  OPTIONS method - Describe communication options. Safe and idempotent.
+</ResponseField>
+
+<ResponseField name="Trace" type="t">
+  TRACE method - Echo the request for diagnostic purposes. Safe and idempotent.
+</ResponseField>
+
+<ResponseField name="Patch" type="t">
+  PATCH method - Partial modification of a resource. Not idempotent.
+</ResponseField>
+
+## Functions
+
+### `to_string`
+
+```ocaml
+val to_string : t -> string
+```
+
+Convert method to uppercase string representation.
+
+**Returns:** String representation of the HTTP method ("GET", "POST", etc.)
+
+**Example:**
+
+```ocaml
+Method.to_string Get     (* Returns: "GET" *)
+Method.to_string Post    (* Returns: "POST" *)
+Method.to_string Delete  (* Returns: "DELETE" *)
+```
+
+### `pp`
+
+```ocaml
+val pp : Stdlib.Format.formatter -> t -> unit
+```
+
+Pretty-print HTTP method.
+
+<ParamField path="fmt" type="Stdlib.Format.formatter">
+  Formatter to write output to
+</ParamField>
+
+<ParamField path="method" type="t">
+  Method to print
+</ParamField>
+
+**Example:**
+
+```ocaml
+Method.pp Format.std_formatter Get
+(* Prints: "GET" *)
+```
+
+## Usage Examples
+
+### Method Matching
+
+```ocaml
+open Httpz
+
+let handle_request buf req headers =
+  match req.#meth with
+  | Method.Get -> handle_get buf req headers
+  | Method.Post -> handle_post buf req headers
+  | Method.Put -> handle_put buf req headers
+  | Method.Delete -> handle_delete buf req headers
+  | Method.Options -> handle_options buf req headers
+  | Method.Head -> handle_head buf req headers
+  | Method.Patch -> handle_patch buf req headers
+  | _ -> send_error buf Res.Method_not_allowed "Method not supported"
+```
+
+### Safe Method Check
+
+```ocaml
+let is_safe_method = function
+  | Method.Get | Method.Head | Method.Options | Method.Trace -> true
+  | _ -> false
+
+let requires_csrf_protection req =
+  (* CSRF protection only needed for unsafe methods *)
+  not (is_safe_method req.#meth)
+```
+
+### Idempotent Method Check
+
+```ocaml
+let is_idempotent = function
+  | Method.Get | Method.Head | Method.Put | Method.Delete
+  | Method.Options | Method.Trace -> true
+  | Method.Post | Method.Patch -> false
+  | Method.Connect -> false
+
+let can_retry req =
+  (* Only retry idempotent requests automatically *)
+  is_idempotent req.#meth
+```
+
+### Method-Specific Routing
+
+```ocaml
+let route_api_request buf req headers =
+  let path = Span.to_string buf req.#target in
+  
+  match (req.#meth, path) with
+  | (Method.Get, "/api/users") -> list_users buf
+  | (Method.Get, _) when String.is_prefix path ~prefix:"/api/users/" ->
+      get_user buf (extract_id path)
+  | (Method.Post, "/api/users") -> create_user buf req
+  | (Method.Put, _) when String.is_prefix path ~prefix:"/api/users/" ->
+      update_user buf req (extract_id path)
+  | (Method.Delete, _) when String.is_prefix path ~prefix:"/api/users/" ->
+      delete_user buf (extract_id path)
+  | (Method.Options, _) -> send_cors_preflight buf
+  | _ -> send_error buf Res.Not_found "Endpoint not found"
+```
+
+### Logging Requests
+
+```ocaml
+let log_request req =
+  let method_str = Method.to_string req.#meth in
+  let target_str = Span.to_string buf req.#target in
+  let version_str = Version.to_string req.#version in
+  
+  Log.info "Request: %s %s %s" method_str target_str version_str
+```
+
+### Method Validation
+
+```ocaml
+let validate_method_for_resource resource_type req =
+  match (resource_type, req.#meth) with
+  | ("read-only", Method.Get | Method.Head | Method.Options) -> Ok ()
+  | ("read-only", _) -> Error "Resource is read-only"
+  | ("no-delete", Method.Delete) -> Error "Delete not allowed"
+  | _ -> Ok ()
+```
+
+### REST API Handler
+
+```ocaml
+type resource = { id : int; name : string; data : string }
+
+let handle_resource_request buf req resource_id =
+  match req.#meth with
+  | Method.Get ->
+      (* Retrieve resource *)
+      let resource = get_resource resource_id in
+      send_json_response buf (resource_to_json resource)
+  
+  | Method.Put ->
+      (* Replace resource *)
+      let body = Req.body_span ~len:(get_buf_len ()) req in
+      let data = Span.to_string buf body in
+      update_resource resource_id data;
+      send_response buf Res.No_content
+  
+  | Method.Patch ->
+      (* Partial update *)
+      let body = Req.body_span ~len:(get_buf_len ()) req in
+      let data = Span.to_string buf body in
+      patch_resource resource_id data;
+      send_response buf Res.Success
+  
+  | Method.Delete ->
+      (* Remove resource *)
+      delete_resource resource_id;
+      send_response buf Res.No_content
+  
+  | Method.Options ->
+      (* Return allowed methods *)
+      let off = Span.of_int 0 in
+      let off = Res.write_status_line buf ~off Res.Success Version.Http_1_1 in
+      let off = Res.write_header buf ~off "Allow" "GET, PUT, PATCH, DELETE, OPTIONS" in
+      let off = Res.write_content_length buf ~off 0 in
+      let off = Res.write_crlf buf ~off in
+      send_to_client buf ~len:(Span.to_int off)
+  
+  | _ ->
+      send_error buf Res.Method_not_allowed "Method not allowed for this resource"
+```
+
+### HEAD Method Handling
+
+```ocaml
+let handle_head_request buf req =
+  (* HEAD should return same headers as GET, but no body *)
+  let resource = lookup_resource (Span.to_string buf req.#target) in
+  
+  let off = Span.of_int 0 in
+  let off = Res.write_status_line buf ~off Res.Success Version.Http_1_1 in
+  let off = Res.write_header buf ~off "Content-Type" (resource_content_type resource) in
+  let off = Res.write_content_length buf ~off (resource_size resource) in
+  let off = Res.write_header buf ~off "Last-Modified" (resource_last_modified resource) in
+  let off = Res.write_crlf buf ~off in
+  (* No body for HEAD *)
+  send_to_client buf ~len:(Span.to_int off)
+```
+
+### CORS Preflight
+
+```ocaml
+let handle_cors_preflight buf req =
+  match req.#meth with
+  | Method.Options ->
+      let off = Span.of_int 0 in
+      let off = Res.write_status_line buf ~off Res.No_content Version.Http_1_1 in
+      let off = Res.write_header buf ~off "Access-Control-Allow-Origin" "*" in
+      let off = Res.write_header buf ~off "Access-Control-Allow-Methods" 
+                  "GET, POST, PUT, DELETE, PATCH, OPTIONS" in
+      let off = Res.write_header buf ~off "Access-Control-Allow-Headers" "Content-Type, Authorization" in
+      let off = Res.write_header buf ~off "Access-Control-Max-Age" "86400" in
+      let off = Res.write_crlf buf ~off in
+      send_to_client buf ~len:(Span.to_int off)
+  | _ -> handle_request buf req
+```

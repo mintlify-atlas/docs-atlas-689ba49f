@@ -1,0 +1,113 @@
+---
+title: "Version"
+description: "HTTP version type for HTTP/1.0 and HTTP/1.1"
+---
+
+The `Version` module provides a simple enumeration for HTTP protocol versions supported by httpz.
+
+## Type Definition
+
+<ResponseField name="t" type="variant">
+  HTTP version enumeration.
+
+  <ResponseField name="Http_1_0" type="variant">
+    HTTP/1.0 protocol version
+  </ResponseField>
+
+  <ResponseField name="Http_1_1" type="variant">
+    HTTP/1.1 protocol version
+  </ResponseField>
+</ResponseField>
+
+## Conversion Functions
+
+### `to_string`
+
+```ocaml
+val to_string : t -> string
+```
+
+Convert HTTP version to string representation.
+
+<ParamField path="version" type="t" required>
+  The HTTP version to convert
+</ParamField>
+
+**Returns:**
+- `"HTTP/1.0"` for `Http_1_0`
+- `"HTTP/1.1"` for `Http_1_1`
+
+**Example:**
+
+```ocaml
+let version_str = Version.to_string Http_1_1 in
+(* Returns: "HTTP/1.1" *)
+
+let older_version = Version.to_string Http_1_0 in
+(* Returns: "HTTP/1.0" *)
+```
+
+## Pretty Printing
+
+### `pp`
+
+```ocaml
+val pp : Stdlib.Format.formatter -> t -> unit
+```
+
+Pretty-print HTTP version.
+
+<ParamField path="formatter" type="Stdlib.Format.formatter" required>
+  The formatter to print to
+</ParamField>
+
+<ParamField path="version" type="t" required>
+  The HTTP version to print
+</ParamField>
+
+**Example:**
+
+```ocaml
+Format.printf "Protocol: %a@." Version.pp Http_1_1
+(* Output: Protocol: HTTP/1.1 *)
+```
+
+## Usage Examples
+
+### Checking HTTP Version
+
+```ocaml
+let handle_request req =
+  match req.version with
+  | Http_1_1 ->
+    (* HTTP/1.1 features available *)
+    (* Persistent connections enabled by default *)
+    ...
+  | Http_1_0 ->
+    (* HTTP/1.0 compatibility mode *)
+    (* Disable persistent connections unless Keep-Alive header present *)
+    ...
+```
+
+### Version-Specific Response Headers
+
+```ocaml
+let write_response version status =
+  let version_str = Version.to_string version in
+  Printf.sprintf "%s %d %s\r\n" 
+    version_str 
+    status.code 
+    status.reason
+```
+
+### Logging Request Version
+
+```ocaml
+let log_request req =
+  Format.fprintf log_formatter 
+    "[%s] %s %s %a@."
+    timestamp
+    (Method.to_string req.method_)
+    (Span.to_string buffer req.target_span)
+    Version.pp req.version
+```

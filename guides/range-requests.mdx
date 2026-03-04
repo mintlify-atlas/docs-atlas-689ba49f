@@ -1,0 +1,433 @@
+---
+title: Range Requests
+description: Learn how to handle HTTP range requests and serve partial content with httpz
+---
+
+## Overview
+
+Range requests allow clients to request specific byte ranges of a resource, enabling features like resumable downloads, video seeking, and efficient large file transfers. Httpz provides the `Range` module for parsing Range headers and generating 206 Partial Content responses per [RFC 7233](https://datatracker.ietf.org/doc/html/rfc7233).
+
+## Range Request Flow
+
+<Steps>
+  <Step title="Parse Range header">
+    Extract and parse the Range header from the request.
+  </Step>
+
+  <Step title="Evaluate ranges">
+    Resolve ranges against the resource length to determine validity.
+  </Step>
+
+  <Step title="Send response">
+    Return 206 Partial Content with the requested bytes, or 416 Range Not Satisfiable if invalid.
+  </Step>
+</Steps>
+
+## Parsing Range Headers
+
+### Range Types
+
+HTTP supports three types of byte ranges:
+
+```ocaml
+(* Standard range: bytes=0-499 *)
+is_range r    (* start and end specified *)
+
+(* Suffix range: bytes=-500 *)
+is_suffix r   (* last N bytes *)
+
+(* Open range: bytes=9500- *)
+is_open r     (* start to end of file *)
+```
+
+### Parsing from Request
+
+```ocaml
+let handle_range_request buf headers ~file_size =
+  (* Create reusable arrays *)
+  let ranges = Array.create ~len:(to_int Range.max_ranges) Range.empty in
+  let resolved = Array.create ~len:(to_int Range.max_ranges) Range.empty_resolved in
+  
+  (* Find Range header *)
+  match Header.find headers Header_name.Range with
+  | None ->
+    (* No range request - serve full content *)
+    serve_full_content ()
+  
+  | Some hdr ->
+    (* Parse Range header value *)
+    let #(status, count) = Range.parse buf hdr.value ranges in
+    
+    match status with
+    | Range.Valid ->
+      (* Ranges parsed successfully *)
+      evaluate_ranges ranges ~count ~file_size resolved
+    
+    | Range.Invalid ->
+      (* Invalid range syntax - ignore and serve full content *)
+      serve_full_content ()
+```
+
+### Parsing from String
+
+For convenience, parse from a string:
+
+```ocaml
+let ranges = Array.create ~len:(to_int Range.max_ranges) Range.empty in
+let #(status, count) = Range.parse_string "bytes=0-499" ranges in
+
+match status with
+| Range.Valid ->
+  Printf.printf "Parsed %d ranges\n" (to_int count)
+| Range.Invalid ->
+  Printf.printf "Invalid range syntax\n"
+```
+
+## Range Evaluation
+
+After parsing, evaluate ranges against the resource length:
+
+```ocaml
+type eval_result =
+  | Full_content       (* Serve full content *)
+  | Single_range       (* Single range - use first resolved *)
+  | Multiple_ranges    (* Multiple ranges - multipart response *)
+  | Not_satisfiable    (* 416 error - no valid ranges *)
+```
+
+### Example Evaluation
+
+```ocaml
+let evaluate_and_serve ranges ~count ~file_size resolved =
+  let #(result, resolved_count) = 
+    Range.evaluate ranges ~count 
+      ~resource_length:(Int64_u.of_int64 file_size) 
+      resolved
+  in
+  
+  match result with
+  | Range.Full_content ->
+    (* All ranges are invalid or entire file requested *)
+    send_200_full_content file_size
+  
+  | Range.Single_range ->
+    (* Single valid range - send 206 response *)
+    let r = Array.get resolved 0 in
+    let start = Int64_u.to_int64 r.#start in
+    let end_ = Int64_u.to_int64 r.#end_ in
+    let length = Int64_u.to_int64 r.#length in
+    send_206_partial start end_ length file_size
+  
+  | Range.Multiple_ranges ->
+    (* Multiple ranges - send multipart/byteranges *)
+    send_multipart_ranges resolved ~count:resolved_count ~file_size
+  
+  | Range.Not_satisfiable ->
+    (* No valid ranges - send 416 *)
+    send_416_not_satisfiable file_size
+```
+
+## Writing Partial Content Responses
+
+### 206 Partial Content (Single Range)
+
+```ocaml
+let send_206_response writer ~start ~end_ ~total ~content_type ~data =
+  let buf = create_response_buffer () in
+  let off = i16 0 in
+  
+  (* Status line *)
+  let off = Res.write_status_line buf ~off Res.Partial_content Version.Http_1_1 in
+  
+  (* Headers *)
+  let off = Res.write_header_name buf ~off Header_name.Content_type content_type in
+  
+  (* Content-Length: number of bytes in this range *)
+  let content_length = Int64.(to_int_exn (end_ - start + 1L)) in
+  let off = Res.write_content_length buf ~off content_length in
+  
+  (* Content-Range: bytes start-end/total *)
+  let off = Range.write_content_range buf ~off
+    ~start:(Int64_u.of_int64 start)
+    ~end_:(Int64_u.of_int64 end_)
+    ~total:(Int64_u.of_int64 total) in
+  
+  let off = Res.write_connection buf ~off ~keep_alive:true in
+  let off = Res.write_crlf buf ~off in
+  
+  (* Send headers *)
+  Writer.write_bigstring writer buf ~pos:0 ~len:(to_int off);
+  
+  (* Send partial data *)
+  Writer.write writer data;
+  Writer.flushed writer
+```
+
+### Using Resolved Range
+
+Convenient function for writing from resolved range:
+
+```ocaml
+let send_206_from_resolved writer ~resolved ~total ~content_type ~data =
+  let buf = create_response_buffer () in
+  let off = i16 0 in
+  
+  let off = Res.write_status_line buf ~off Res.Partial_content Version.Http_1_1 in
+  let off = Res.write_header_name buf ~off Header_name.Content_type content_type in
+  
+  let content_length = Int64_u.to_int64 resolved.#length |> Int64.to_int_exn in
+  let off = Res.write_content_length buf ~off content_length in
+  
+  (* Write Content-Range from resolved range *)
+  let off = Range.write_content_range_resolved buf ~off resolved ~total in
+  
+  let off = Res.write_connection buf ~off ~keep_alive:true in
+  let off = Res.write_crlf buf ~off in
+  
+  Writer.write_bigstring writer buf ~pos:0 ~len:(to_int off);
+  Writer.write writer data;
+  Writer.flushed writer
+```
+
+### 416 Range Not Satisfiable
+
+```ocaml
+let send_416_response writer ~total =
+  let buf = create_response_buffer () in
+  let off = i16 0 in
+  
+  let off = Res.write_status_line buf ~off Res.Range_not_satisfiable Version.Http_1_1 in
+  
+  (* Content-Range: bytes */total *)
+  let off = Range.write_content_range_unsatisfiable buf ~off
+    ~total:(Int64_u.of_int64 total) in
+  
+  let off = Res.write_content_length buf ~off 0 in
+  let off = Res.write_connection buf ~off ~keep_alive:false in
+  let off = Res.write_crlf buf ~off in
+  
+  Writer.write_bigstring writer buf ~pos:0 ~len:(to_int off);
+  Writer.flushed writer
+```
+
+## Accept-Ranges Header
+
+Advertise range support in 200 OK responses:
+
+```ocaml
+(* Indicate byte ranges are supported *)
+let off = Range.write_accept_ranges buf ~off in
+(* Writes "Accept-Ranges: bytes\r\n" *)
+
+(* Indicate ranges are not supported *)
+let off = Range.write_accept_ranges_none buf ~off in
+(* Writes "Accept-Ranges: none\r\n" *)
+```
+
+## Complete Example
+
+```ocaml
+let handle_file_request writer buf headers ~file_path ~file_size =
+  (* Create reusable arrays *)
+  let ranges = Array.create ~len:(to_int Range.max_ranges) Range.empty in
+  let resolved = Array.create ~len:(to_int Range.max_ranges) Range.empty_resolved in
+  
+  (* Check for Range header *)
+  let range_count = 
+    match Header.find headers Header_name.Range with
+    | None -> 0
+    | Some hdr ->
+      let #(status, count) = Range.parse buf hdr.value ranges in
+      match status with
+      | Range.Invalid -> 0
+      | Range.Valid -> to_int count
+  in
+  
+  if range_count = 0 then (
+    (* No range request - serve full file *)
+    let response_buf = create_response_buffer () in
+    let off = i16 0 in
+    let off = Res.write_status_line response_buf ~off Res.Success Version.Http_1_1 in
+    let off = Res.write_header_name response_buf ~off 
+      Header_name.Content_type "application/octet-stream" in
+    let off = Res.write_content_length response_buf ~off 
+      (Int64.to_int_exn file_size) in
+    let off = Range.write_accept_ranges response_buf ~off in
+    let off = Res.write_connection response_buf ~off ~keep_alive:true in
+    let off = Res.write_crlf response_buf ~off in
+    
+    Writer.write_bigstring writer response_buf ~pos:0 ~len:(to_int off);
+    stream_full_file writer file_path
+  ) else (
+    (* Evaluate ranges *)
+    let #(result, _resolved_count) = 
+      Range.evaluate ranges ~count:(i16 range_count)
+        ~resource_length:(Int64_u.of_int64 file_size)
+        resolved
+    in
+    
+    match result with
+    | Range.Full_content ->
+      (* Serve full file *)
+      serve_full_file writer file_path file_size
+    
+    | Range.Single_range ->
+      (* Send 206 with requested range *)
+      let r = Array.get resolved 0 in
+      let start = Int64_u.to_int64 r.#start in
+      let end_ = Int64_u.to_int64 r.#end_ in
+      send_partial_file writer file_path ~start ~end_ ~total:file_size
+    
+    | Range.Multiple_ranges ->
+      (* Send multipart response *)
+      send_multipart_response writer file_path resolved ~file_size
+    
+    | Range.Not_satisfiable ->
+      send_416_response writer ~total:file_size
+  )
+```
+
+## Multipart Byte Ranges
+
+For multiple ranges, send a `multipart/byteranges` response:
+
+```ocaml
+let send_multipart_ranges writer file_path resolved ~count ~file_size =
+  let boundary = Range.generate_boundary () in
+  let content_type = sprintf "multipart/byteranges; boundary=%s" boundary in
+  
+  let buf = create_response_buffer () in
+  let off = i16 0 in
+  
+  (* Write headers *)
+  let off = Res.write_status_line buf ~off Res.Partial_content Version.Http_1_1 in
+  let off = Res.write_header_name buf ~off Header_name.Content_type content_type in
+  (* Note: Content-Length is complex for multipart, often omitted *)
+  let off = Res.write_connection buf ~off ~keep_alive:true in
+  let off = Res.write_crlf buf ~off in
+  Writer.write_bigstring writer buf ~pos:0 ~len:(to_int off);
+  
+  (* Send each range *)
+  for i = 0 to to_int count - 1 do
+    let r = Array.get resolved i in
+    let start = Int64_u.to_int64 r.#start in
+    let end_ = Int64_u.to_int64 r.#end_ in
+    
+    (* Write boundary *)
+    let off = i16 0 in
+    let off = Range.write_multipart_boundary buf ~off ~boundary in
+    Writer.write_bigstring writer buf ~pos:0 ~len:(to_int off);
+    
+    (* Write part headers *)
+    let off = i16 0 in
+    let off = Res.write_header buf ~off "Content-Type" "application/octet-stream" in
+    let off = Range.write_content_range buf ~off
+      ~start:(Int64_u.of_int64 start)
+      ~end_:(Int64_u.of_int64 end_)
+      ~total:(Int64_u.of_int64 file_size) in
+    let off = Res.write_crlf buf ~off in
+    Writer.write_bigstring writer buf ~pos:0 ~len:(to_int off);
+    
+    (* Send part data *)
+    send_file_range writer file_path ~start ~end_
+  done;
+  
+  (* Write final boundary *)
+  let off = i16 0 in
+  let off = Range.write_multipart_final buf ~off ~boundary in
+  Writer.write_bigstring writer buf ~pos:0 ~len:(to_int off);
+  Writer.flushed writer
+```
+
+## Range Examples
+
+### First 500 bytes
+
+```
+Range: bytes=0-499
+```
+
+```ocaml
+(* Resolves to: *)
+r.#start = 0L
+r.#end_ = 499L
+r.#length = 500L
+```
+
+### Last 500 bytes
+
+```
+Range: bytes=-500
+```
+
+```ocaml
+(* For 10KB file, resolves to: *)
+r.#start = 9740L
+r.#end_ = 10239L
+r.#length = 500L
+```
+
+### From byte 9500 to end
+
+```
+Range: bytes=9500-
+```
+
+```ocaml
+(* For 10KB file, resolves to: *)
+r.#start = 9500L
+r.#end_ = 10239L
+r.#length = 740L
+```
+
+### Multiple ranges
+
+```
+Range: bytes=0-99,200-299,400-499
+```
+
+```ocaml
+(* Resolves to 3 ranges *)
+count = 3
+```
+
+## Best Practices
+
+1. **Always validate ranges**: Use `Range.evaluate` to check range validity
+2. **Handle 416 correctly**: Return Range Not Satisfiable for invalid ranges
+3. **Advertise support**: Include `Accept-Ranges: bytes` in 200 OK responses
+4. **Reuse arrays**: Create range and resolved arrays once and reuse them
+5. **Efficient file I/O**: Use platform-specific APIs (sendfile, mmap) for serving ranges
+6. **Combine with ETags**: Support range requests with conditional requests for caching
+
+<Warning>
+  When combining range requests with ETags, use strong comparison. Weak ETags should not be used with range requests.
+</Warning>
+
+## Error Handling
+
+```ocaml
+match Range.evaluate ranges ~count ~resource_length resolved with
+| Range.Not_satisfiable ->
+  (* Examples:
+   * - Range starts beyond file size
+   * - Range end before start
+   * - All ranges are invalid
+   *)
+  send_416_response ()
+
+| Range.Full_content ->
+  (* Examples:
+   * - All ranges are invalid but some parsing succeeded
+   * - Client requested entire file as range
+   *)
+  send_200_response ()
+
+| _ -> (* Valid ranges *)
+```
+
+## See Also
+
+- [Writing Responses](/guides/writing-responses) - HTTP response basics
+- [ETags](/guides/etags) - Conditional requests with ranges
+- [Security](/guides/security) - Range validation and limits

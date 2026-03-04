@@ -1,0 +1,337 @@
+---
+title: "Span"
+description: "Unboxed span type for zero-allocation buffer references"
+---
+
+The `Span` module provides an unboxed span type that references regions of buffers using offset and length. Spans use `int16#` internally since the maximum buffer size is 32KB, enabling zero-allocation buffer operations.
+
+## Type Definition
+
+<ResponseField name="t" type="record">
+  The span type representing an offset and length into a buffer.
+  
+  <ResponseField name="off" type="int16#">
+    Offset into the buffer (unboxed int16)
+  </ResponseField>
+  
+  <ResponseField name="len" type="int16#">
+    Length of the span (unboxed int16)
+  </ResponseField>
+</ResponseField>
+
+## Construction
+
+### `make`
+
+```ocaml
+val make : off:int16# -> len:int16# -> t
+```
+
+Create a span from int16# offset and length.
+
+<ParamField path="off" type="int16#" required>
+  The offset into the buffer
+</ParamField>
+
+<ParamField path="len" type="int16#" required>
+  The length of the span
+</ParamField>
+
+**Example:**
+
+```ocaml
+let span = Span.make ~off:(Span.of_int 10) ~len:(Span.of_int 5)
+```
+
+## Conversion Functions
+
+### `of_int`
+
+```ocaml
+val of_int : int -> int16#
+```
+
+Convert int to int16# for use in span construction.
+
+<ParamField path="n" type="int" required>
+  The integer value to convert
+</ParamField>
+
+### `to_int`
+
+```ocaml
+val to_int : int16# -> int
+```
+
+Convert int16# to int for regular operations.
+
+<ParamField path="n" type="int16#" required>
+  The unboxed int16 value to convert
+</ParamField>
+
+## Accessors
+
+### `off16`
+
+```ocaml
+val off16 : t -> int16#
+```
+
+Get offset as int16# (unboxed).
+
+<ParamField path="span" type="t" required>
+  The span to get the offset from
+</ParamField>
+
+### `len16`
+
+```ocaml
+val len16 : t -> int16#
+```
+
+Get length as int16# (unboxed).
+
+<ParamField path="span" type="t" required>
+  The span to get the length from
+</ParamField>
+
+### `off`
+
+```ocaml
+val off : t -> int
+```
+
+Get offset as int (for array indexing).
+
+<ParamField path="span" type="t" required>
+  The span to get the offset from
+</ParamField>
+
+**Example:**
+
+```ocaml
+let offset = Span.off span in
+let byte = Bigstringaf.get buffer offset
+```
+
+### `len`
+
+```ocaml
+val len : t -> int
+```
+
+Get length as int (for comparisons with String.length etc).
+
+<ParamField path="span" type="t" required>
+  The span to get the length from
+</ParamField>
+
+## Comparison Functions
+
+### `equal`
+
+```ocaml
+val equal : local_ Base_bigstring.t -> t -> string -> bool
+```
+
+Case-sensitive comparison of span contents with a string.
+
+<ParamField path="buf" type="local_ Base_bigstring.t" required>
+  The buffer containing the span data
+</ParamField>
+
+<ParamField path="span" type="t" required>
+  The span to compare
+</ParamField>
+
+<ParamField path="str" type="string" required>
+  The string to compare against
+</ParamField>
+
+**Example:**
+
+```ocaml
+if Span.equal buffer method_span "GET" then
+  (* Handle GET request *)
+  ...
+```
+
+### `equal_caseless`
+
+```ocaml
+val equal_caseless : local_ Base_bigstring.t -> t -> string -> bool
+```
+
+Case-insensitive comparison of span contents with a string.
+
+<ParamField path="buf" type="local_ Base_bigstring.t" required>
+  The buffer containing the span data
+</ParamField>
+
+<ParamField path="span" type="t" required>
+  The span to compare
+</ParamField>
+
+<ParamField path="str" type="string" required>
+  The string to compare against (case-insensitive)
+</ParamField>
+
+**Example:**
+
+```ocaml
+if Span.equal_caseless buffer header_value "chunked" then
+  (* Handle chunked encoding *)
+  ...
+```
+
+## Parsing Functions
+
+### `parse_int64`
+
+```ocaml
+val parse_int64 : local_ Base_bigstring.t -> t -> int64#
+```
+
+Parse decimal integer from span. Returns `-1L` on error.
+
+<Warning>
+  This does NOT check for overflow. Use `parse_int64_limited` for security-critical parsing.
+</Warning>
+
+<ParamField path="buf" type="local_ Base_bigstring.t" required>
+  The buffer containing the span data
+</ParamField>
+
+<ParamField path="span" type="t" required>
+  The span containing the decimal digits
+</ParamField>
+
+**Example:**
+
+```ocaml
+let content_length = Span.parse_int64 buffer length_span in
+if Int64.compare content_length (Int64.of_int (-1)) = 0 then
+  (* Invalid number *)
+  ...
+```
+
+### `parse_int64_limited`
+
+```ocaml
+val parse_int64_limited : local_ Base_bigstring.t -> t -> max_value:int64# -> #(int64# * bool)
+```
+
+Parse decimal integer from span with overflow protection and maximum value limit.
+
+Returns unboxed tuple `#(value, overflow_flag)` where:
+- `value`: parsed value or `-1L` if empty/invalid
+- `overflow_flag`: `true` if value exceeds `max_value` or has too many digits
+
+<ParamField path="buf" type="local_ Base_bigstring.t" required>
+  The buffer containing the span data
+</ParamField>
+
+<ParamField path="span" type="t" required>
+  The span containing the decimal digits
+</ParamField>
+
+<ParamField path="max_value" type="int64#" required>
+  Maximum allowed value (returns overflow flag if exceeded)
+</ParamField>
+
+**Example:**
+
+```ocaml
+let max_content_length = Int64.of_int 10_000_000 in
+let #(length, overflow) = 
+  Span.parse_int64_limited buffer length_span ~max_value:max_content_length in
+if overflow then
+  (* Content-Length too large *)
+  raise (Error Content_length_overflow)
+```
+
+## Conversion to Allocated Types
+
+### `to_string`
+
+```ocaml
+val to_string : local_ Base_bigstring.t -> t -> string
+```
+
+Copy span contents to a string. Allocates memory.
+
+<ParamField path="buf" type="local_ Base_bigstring.t" required>
+  The buffer containing the span data
+</ParamField>
+
+<ParamField path="span" type="t" required>
+  The span to copy
+</ParamField>
+
+**Example:**
+
+```ocaml
+let path = Span.to_string buffer request.target_span in
+printf "Request path: %s\n" path
+```
+
+### `to_bytes`
+
+```ocaml
+val to_bytes : local_ Base_bigstring.t -> t -> bytes
+```
+
+Copy span contents to bytes. Allocates memory.
+
+<ParamField path="buf" type="local_ Base_bigstring.t" required>
+  The buffer containing the span data
+</ParamField>
+
+<ParamField path="span" type="t" required>
+  The span to copy
+</ParamField>
+
+## Pretty Printing
+
+### `pp_with_buf`
+
+```ocaml
+val pp_with_buf : local_ Base_bigstring.t -> Stdlib.Format.formatter -> t -> unit
+```
+
+Pretty-print span contents using buffer.
+
+<ParamField path="buf" type="local_ Base_bigstring.t" required>
+  The buffer containing the span data
+</ParamField>
+
+<ParamField path="formatter" type="Stdlib.Format.formatter" required>
+  The formatter to print to
+</ParamField>
+
+<ParamField path="span" type="t" required>
+  The span to print
+</ParamField>
+
+### `pp`
+
+```ocaml
+val pp : Stdlib.Format.formatter -> t -> unit
+```
+
+Pretty-print span structure (offset and length).
+
+<ParamField path="formatter" type="Stdlib.Format.formatter" required>
+  The formatter to print to
+</ParamField>
+
+<ParamField path="span" type="t" required>
+  The span to print
+</ParamField>
+
+**Example:**
+
+```ocaml
+Format.printf "Span: %a@." Span.pp span
+(* Output: Span: {off=10; len=5} *)
+```

@@ -1,0 +1,362 @@
+---
+title: Writing HTTP Responses
+description: Learn how to write HTTP/1.1 responses using httpz's zero-copy bigstring writers
+---
+
+## Overview
+
+The `Res` module provides functions for writing HTTP responses directly into bigstring buffers. All functions operate on bigstrings for zero-copy I/O and use `int16#` offsets for efficient stack-allocated position tracking.
+
+## Response Buffer Setup
+
+<Steps>
+  <Step title="Create a response buffer">
+    Create a bigstring buffer for response headers:
+
+    ```ocaml
+    let response_buffer_size = 65536  (* 64KB *)
+    let write_buf = 
+      Bigarray.Array1.create Bigarray.char Bigarray.c_layout response_buffer_size
+    ```
+  </Step>
+
+  <Step title="Initialize offset">
+    Start writing at offset 0:
+
+    ```ocaml
+    let off = Httpz.Buf_write.i16 0
+    ```
+  </Step>
+
+  <Step title="Write response components">
+    Each write function returns the new offset:
+
+    ```ocaml
+    let off = Res.write_status_line write_buf ~off Res.Success Version.Http_1_1 in
+    let off = Res.write_header write_buf ~off "Content-Type" "text/html" in
+    let off = Res.write_crlf write_buf ~off in
+    (* Send buffer from 0 to off *)
+    ```
+  </Step>
+</Steps>
+
+## Status Codes
+
+Httpz provides a comprehensive `Res.status` type with all standard HTTP status codes:
+
+### Success Responses (2xx)
+
+```ocaml
+Res.Success                 (* 200 OK *)
+Res.Created                 (* 201 Created *)
+Res.Accepted                (* 202 Accepted *)
+Res.No_content              (* 204 No Content *)
+Res.Partial_content         (* 206 Partial Content *)
+```
+
+### Redirections (3xx)
+
+```ocaml
+Res.Moved_permanently       (* 301 Moved Permanently *)
+Res.Found                   (* 302 Found *)
+Res.See_other               (* 303 See Other *)
+Res.Not_modified            (* 304 Not Modified *)
+Res.Temporary_redirect      (* 307 Temporary Redirect *)
+Res.Permanent_redirect      (* 308 Permanent Redirect *)
+```
+
+### Client Errors (4xx)
+
+```ocaml
+Res.Bad_request             (* 400 Bad Request *)
+Res.Unauthorized            (* 401 Unauthorized *)
+Res.Forbidden               (* 403 Forbidden *)
+Res.Not_found               (* 404 Not Found *)
+Res.Method_not_allowed      (* 405 Method Not Allowed *)
+Res.Request_timeout         (* 408 Request Timeout *)
+Res.Payload_too_large       (* 413 Payload Too Large *)
+Res.Range_not_satisfiable   (* 416 Range Not Satisfiable *)
+Res.Too_many_requests       (* 429 Too Many Requests *)
+```
+
+### Server Errors (5xx)
+
+```ocaml
+Res.Internal_server_error   (* 500 Internal Server Error *)
+Res.Not_implemented         (* 501 Not Implemented *)
+Res.Service_unavailable     (* 503 Service Unavailable *)
+```
+
+<Note>
+  See `/home/daytona/workspace/source/lib/res.mli:8` for the complete list of status codes.
+</Note>
+
+## Writing Status Line
+
+The status line is written with `write_status_line`:
+
+```ocaml
+val write_status_line : 
+  Base_bigstring.t -> off:int16# -> status -> Version.t -> int16#
+```
+
+### Example
+
+```ocaml
+(* Write "HTTP/1.1 200 OK\r\n" *)
+let off = Res.write_status_line buf ~off:(i16 0) Res.Success Version.Http_1_1 in
+
+(* Write "HTTP/1.0 404 Not Found\r\n" *)
+let off = Res.write_status_line buf ~off Res.Not_found Version.Http_1_0 in
+```
+
+## Writing Headers
+
+### String Header Names
+
+For custom headers, use `write_header`:
+
+```ocaml
+(* Write "Content-Type: application/json\r\n" *)
+let off = Res.write_header buf ~off "Content-Type" "application/json" in
+
+(* Write "Cache-Control: no-cache\r\n" *)
+let off = Res.write_header buf ~off "Cache-Control" "no-cache" in
+```
+
+### Typed Header Names
+
+For known headers, use `write_header_name` for better performance:
+
+```ocaml
+(* Write "Content-Type: text/html\r\n" *)
+let off = Res.write_header_name buf ~off 
+  Header_name.Content_type "text/html" in
+
+(* Write "Server: httpz/1.0\r\n" *)
+let off = Res.write_header_name buf ~off 
+  Header_name.Server "httpz/1.0" in
+```
+
+### Integer Header Values
+
+For integer values, use the `_int` variants:
+
+```ocaml
+(* Write "Max-Age: 3600\r\n" *)
+let off = Res.write_header_int buf ~off "Max-Age" 3600 in
+
+(* Write "Content-Length: 1234\r\n" *)
+let off = Res.write_header_name_int buf ~off 
+  Header_name.Content_length 1234 in
+```
+
+### Common Headers
+
+Httpz provides specialized functions for common headers:
+
+<CodeGroup>
+```ocaml Content-Length
+(* Write "Content-Length: 4096\r\n" *)
+let off = Res.write_content_length buf ~off 4096
+```
+
+```ocaml Connection
+(* Write "Connection: keep-alive\r\n" *)
+let off = Res.write_connection buf ~off ~keep_alive:true in
+
+(* Write "Connection: close\r\n" *)
+let off = Res.write_connection buf ~off ~keep_alive:false
+```
+
+```ocaml Transfer-Encoding
+(* Write "Transfer-Encoding: chunked\r\n" *)
+let off = Res.write_transfer_encoding_chunked buf ~off
+```
+</CodeGroup>
+
+## Complete Response Example
+
+### Simple Success Response
+
+```ocaml
+let send_success_response writer content =
+  let buf = create_response_buffer () in
+  let off = i16 0 in
+  
+  (* Status line *)
+  let off = Res.write_status_line buf ~off Res.Success Version.Http_1_1 in
+  
+  (* Headers *)
+  let off = Res.write_header_name buf ~off 
+    Header_name.Content_type "text/plain" in
+  let off = Res.write_content_length buf ~off (String.length content) in
+  let off = Res.write_connection buf ~off ~keep_alive:true in
+  
+  (* End of headers *)
+  let off = Res.write_crlf buf ~off in
+  
+  (* Send headers *)
+  Writer.write_bigstring writer buf ~pos:0 ~len:(to_int off);
+  
+  (* Send body *)
+  Writer.write writer content;
+  Writer.flushed writer
+```
+
+### Error Response
+
+```ocaml
+let send_404_response writer =
+  let buf = create_response_buffer () in
+  let message = "Not Found" in
+  let off = i16 0 in
+  
+  let off = Res.write_status_line buf ~off Res.Not_found Version.Http_1_1 in
+  let off = Res.write_header_name buf ~off 
+    Header_name.Content_type "text/plain" in
+  let off = Res.write_content_length buf ~off (String.length message) in
+  let off = Res.write_connection buf ~off ~keep_alive:false in
+  let off = Res.write_crlf buf ~off in
+  
+  Writer.write_bigstring writer buf ~pos:0 ~len:(to_int off);
+  Writer.write writer message;
+  Writer.flushed writer
+```
+
+### JSON Response
+
+```ocaml
+let send_json_response writer json_string =
+  let buf = create_response_buffer () in
+  let off = i16 0 in
+  
+  let off = Res.write_status_line buf ~off Res.Success Version.Http_1_1 in
+  let off = Res.write_header_name buf ~off 
+    Header_name.Content_type "application/json" in
+  let off = Res.write_content_length buf ~off (String.length json_string) in
+  let off = Res.write_header buf ~off "Cache-Control" "no-cache" in
+  let off = Res.write_connection buf ~off ~keep_alive:true in
+  let off = Res.write_crlf buf ~off in
+  
+  Writer.write_bigstring writer buf ~pos:0 ~len:(to_int off);
+  Writer.write writer json_string;
+  Writer.flushed writer
+```
+
+## Redirects
+
+```ocaml
+let send_redirect writer location ~permanent =
+  let buf = create_response_buffer () in
+  let off = i16 0 in
+  
+  let status = if permanent then Res.Moved_permanently else Res.Found in
+  let off = Res.write_status_line buf ~off status Version.Http_1_1 in
+  let off = Res.write_header_name buf ~off Header_name.Location location in
+  let off = Res.write_content_length buf ~off 0 in
+  let off = Res.write_connection buf ~off ~keep_alive:true in
+  let off = Res.write_crlf buf ~off in
+  
+  Writer.write_bigstring writer buf ~pos:0 ~len:(to_int off);
+  Writer.flushed writer
+```
+
+## 304 Not Modified Response
+
+For conditional requests with ETags:
+
+```ocaml
+let send_not_modified writer ~etag ~last_modified =
+  let buf = create_response_buffer () in
+  let off = i16 0 in
+  
+  let off = Res.write_status_line buf ~off Res.Not_modified Version.Http_1_1 in
+  let off = Res.write_header buf ~off "ETag" etag in
+  let off = Date.write_last_modified buf ~off 
+    (Float_u.of_float last_modified) in
+  let off = Res.write_connection buf ~off ~keep_alive:true in
+  let off = Res.write_crlf buf ~off in
+  
+  Writer.write_bigstring writer buf ~pos:0 ~len:(to_int off);
+  Writer.flushed writer
+```
+
+<Note>
+  See the [ETags guide](/guides/etags) for more information on conditional requests.
+</Note>
+
+## Writing Chunked Responses
+
+For responses with unknown content length:
+
+```ocaml
+let send_chunked_response writer =
+  let buf = create_response_buffer () in
+  let off = i16 0 in
+  
+  (* Write headers with Transfer-Encoding: chunked *)
+  let off = Res.write_status_line buf ~off Res.Success Version.Http_1_1 in
+  let off = Res.write_header_name buf ~off 
+    Header_name.Content_type "text/plain" in
+  let off = Res.write_transfer_encoding_chunked buf ~off in
+  let off = Res.write_connection buf ~off ~keep_alive:true in
+  let off = Res.write_crlf buf ~off in
+  
+  Writer.write_bigstring writer buf ~pos:0 ~len:(to_int off);
+  
+  (* Send chunks *)
+  let chunk_data = "Hello, World!" in
+  let chunk_buf = create_response_buffer () in
+  let off = i16 0 in
+  let off = Res.write_chunk_header chunk_buf ~off ~size:(String.length chunk_data) in
+  Writer.write_bigstring writer chunk_buf ~pos:0 ~len:(to_int off);
+  Writer.write writer chunk_data;
+  
+  let off = i16 0 in
+  let off = Res.write_chunk_footer chunk_buf ~off in
+  Writer.write_bigstring writer chunk_buf ~pos:0 ~len:(to_int off);
+  
+  (* Final chunk *)
+  let off = i16 0 in
+  let off = Res.write_final_chunk chunk_buf ~off in
+  Writer.write_bigstring writer chunk_buf ~pos:0 ~len:(to_int off);
+  Writer.flushed writer
+```
+
+<Note>
+  See the [Chunked Encoding guide](/guides/chunked-encoding) for detailed information on chunked transfer encoding.
+</Note>
+
+## Status Code Utilities
+
+The `Res` module provides utility functions for working with status codes:
+
+```ocaml
+(* Get numeric code *)
+let code = Res.status_code Res.Not_found in  (* 404 *)
+
+(* Get reason phrase *)
+let reason = Res.status_reason Res.Not_found in  (* "Not Found" *)
+
+(* Get "CODE Reason" string *)
+let full = Res.status_to_string Res.Not_found in  (* "404 Not Found" *)
+
+(* Pretty-print *)
+Format.printf "%a@." Res.pp_status Res.Success
+```
+
+## Best Practices
+
+1. **Reuse buffers**: Create response buffers once and reuse them across requests
+2. **Thread offsets**: Always use the returned offset for the next write operation
+3. **Measure buffer usage**: Ensure your buffer is large enough for all headers
+4. **Use typed headers**: Prefer `write_header_name` over `write_header` for known headers
+5. **Zero-copy I/O**: Use `Writer.write_bigstring` to send headers without copying
+
+## See Also
+
+- [Parsing Requests](/guides/parsing-requests) - Parse HTTP requests
+- [Chunked Encoding](/guides/chunked-encoding) - Chunked transfer encoding
+- [Range Requests](/guides/range-requests) - Partial content responses
+- [ETags](/guides/etags) - Conditional requests

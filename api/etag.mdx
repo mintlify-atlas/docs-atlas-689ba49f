@@ -1,0 +1,467 @@
+---
+title: Etag
+description: ETag parsing and comparison per RFC 7232
+---
+
+The `Etag` module provides zero-allocation parsing and comparison for HTTP entity tags per [RFC 7232](https://datatracker.ietf.org/doc/html/rfc7232#section-2.3). Entity tags are opaque validators used for conditional requests and cache validation.
+
+## Overview
+
+Entity tags (ETags) are identifiers assigned by a server to specific versions of a resource. They enable:
+- **Cache validation** via `If-None-Match` (weak comparison)
+- **Conditional requests** via `If-Match` (strong comparison)
+- **Range request validation** (requires strong comparison)
+
+ETags come in two varieties:
+- **Strong**: `"xyzzy"` - indicates exact content match
+- **Weak**: `W/"xyzzy"` - indicates semantic equivalence
+
+## Types
+
+### Entity Tag
+
+<ResponseField name="t" type="unboxed record">
+  Unboxed entity tag record pointing into the parse buffer.
+  
+  <ResponseField name="weak" type="bool">
+    `true` if tag is weak (prefixed with `W/`), `false` for strong tags
+  </ResponseField>
+  
+  <ResponseField name="off" type="int16#">
+    Offset of tag content in buffer (after opening quote)
+  </ResponseField>
+  
+  <ResponseField name="len" type="int16#">
+    Length of tag content (excluding quotes)
+  </ResponseField>
+</ResponseField>
+
+### Parse Status
+
+<ResponseField name="status" type="variant">
+  Result status from ETag parsing.
+  
+  <ResponseField name="Valid">
+    Successfully parsed valid ETag
+  </ResponseField>
+  
+  <ResponseField name="Invalid">
+    Invalid ETag syntax
+  </ResponseField>
+</ResponseField>
+
+### Match Condition
+
+<ResponseField name="match_condition" type="variant">
+  Result of parsing `If-Match` or `If-None-Match` header.
+  
+  <ResponseField name="Any">
+    Value is `"*"` - matches any entity (use for unconditional requests)
+  </ResponseField>
+  
+  <ResponseField name="Tags">
+    List of entity tags - retrieve with array and count
+  </ResponseField>
+  
+  <ResponseField name="Empty">
+    No valid tags found (malformed header)
+  </ResponseField>
+</ResponseField>
+
+## Constants
+
+<ResponseField name="max_tags" type="int16#" default="16">
+  Maximum number of ETags that can be parsed from an `If-Match` or `If-None-Match` header.
+</ResponseField>
+
+<ResponseField name="empty" type="t">
+  Empty/invalid ETag constant for initialization.
+</ResponseField>
+
+## Parsing Functions
+
+### parse
+
+```ocaml
+val parse : local_ Base_bigstring.t -> Span.t -> #(status * t)
+```
+
+Parse a single ETag value from a header.
+
+<ParamField path="buf" type="Base_bigstring.t" required>
+  Buffer containing the ETag value (marked as local)
+</ParamField>
+
+<ParamField path="span" type="Span.t" required>
+  Span indicating the ETag value location in buffer
+</ParamField>
+
+**Returns:** Unboxed tuple `#(status * t)` - tag is only valid if status is `Valid`.
+
+**Accepted formats:**
+- Strong ETag: `"xyzzy"`
+- Weak ETag: `W/"xyzzy"`
+- Empty ETag: `""`
+
+**Example:**
+
+```ocaml
+(* Parse ETag header from request *)
+let etag_header = Req.find_header req Header_name.Etag in
+match etag_header with
+| Some span ->
+  let #(status, etag) = Etag.parse (Req.buf req) span in
+  (match status with
+  | Etag.Valid ->
+    (* Use etag for comparison *)
+    if Etag.weak_match (Req.buf req) etag current_etag then
+      (* Resource hasn't changed *)
+      send_304_not_modified ()
+    else
+      send_full_response ()
+  | Etag.Invalid ->
+    (* Ignore malformed ETag *)
+    send_full_response ())
+| None ->
+  send_full_response ()
+```
+
+### parse_match_header
+
+```ocaml
+val parse_match_header
+  :  local_ Base_bigstring.t
+  -> Span.t
+  -> t array
+  -> #(match_condition * int16#)
+```
+
+Parse `If-Match` or `If-None-Match` header value. Handles `"*"` and comma-separated lists of entity tags.
+
+<ParamField path="buf" type="Base_bigstring.t" required>
+  Buffer containing the header value (marked as local)
+</ParamField>
+
+<ParamField path="span" type="Span.t" required>
+  Span indicating the header value location
+</ParamField>
+
+<ParamField path="tags" type="t array" required>
+  Pre-allocated array to store parsed tags (minimum size: `max_tags`)
+</ParamField>
+
+**Returns:** Unboxed tuple `#(match_condition * int16#)` where:
+- First value is the match condition type
+- Second value is the count of tags parsed (only valid if condition is `Tags`)
+
+**Example:**
+
+```ocaml
+(* Parse If-None-Match for cache validation *)
+let if_none_match = Req.find_header req Header_name.If_none_match in
+match if_none_match with
+| Some span ->
+  let tags = Array.make (to_int Etag.max_tags) Etag.empty in
+  let #(condition, count) = Etag.parse_match_header (Req.buf req) span tags in
+  (match condition with
+  | Etag.Any ->
+    (* "*" matches any entity - always modified *)
+    send_full_response ()
+  
+  | Etag.Tags ->
+    (* Check if current ETag matches any in list *)
+    if Etag.matches_any_weak (Req.buf req) current_etag tags ~count then
+      (* Resource hasn't changed *)
+      send_304_not_modified ()
+    else
+      send_full_response ()
+  
+  | Etag.Empty ->
+    (* No valid tags - ignore header *)
+    send_full_response ())
+| None ->
+  send_full_response ()
+```
+
+## Comparison Functions
+
+### strong_match
+
+```ocaml
+val strong_match : local_ Base_bigstring.t -> t -> t -> bool
+```
+
+Strong comparison per [RFC 7232 Section 2.3.2](https://datatracker.ietf.org/doc/html/rfc7232#section-2.3.2). Two entity tags are equivalent if:
+- Both are **not weak** (strong tags only)
+- Their opaque tag values match character-by-character
+
+<ParamField path="buf" type="Base_bigstring.t" required>
+  Buffer containing both tags (marked as local)
+</ParamField>
+
+<ParamField path="a" type="t" required>
+  First entity tag
+</ParamField>
+
+<ParamField path="b" type="t" required>
+  Second entity tag
+</ParamField>
+
+**Returns:** `true` if tags match strongly, `false` otherwise.
+
+**Use cases:** Range requests, `If-Range` validation
+
+**Example:**
+
+```ocaml
+(* Validate If-Range for partial content *)
+let if_range = Req.find_header req Header_name.If_range in
+let can_serve_range = match if_range with
+| Some span ->
+  let #(status, client_etag) = Etag.parse (Req.buf req) span in
+  status = Etag.Valid && 
+  Etag.strong_match (Req.buf req) client_etag resource_etag
+| None -> false
+in
+if can_serve_range then
+  serve_partial_content ()
+else
+  serve_full_content ()
+```
+
+### weak_match
+
+```ocaml
+val weak_match : local_ Base_bigstring.t -> t -> t -> bool
+```
+
+Weak comparison per [RFC 7232 Section 2.3.2](https://datatracker.ietf.org/doc/html/rfc7232#section-2.3.2). Two entity tags are equivalent if:
+- Their opaque tag values match character-by-character
+- Regardless of either or both being weak
+
+<ParamField path="buf" type="Base_bigstring.t" required>
+  Buffer containing both tags (marked as local)
+</ParamField>
+
+<ParamField path="a" type="t" required>
+  First entity tag
+</ParamField>
+
+<ParamField path="b" type="t" required>
+  Second entity tag
+</ParamField>
+
+**Returns:** `true` if tags match weakly, `false` otherwise.
+
+**Use cases:** Cache validation, `If-None-Match`, `If-Match`
+
+**Example:**
+
+```ocaml
+(* Handle If-None-Match for GET request *)
+let handle_if_none_match req current_etag =
+  match Req.find_header req Header_name.If_none_match with
+  | Some span ->
+    let tags = Array.make (to_int Etag.max_tags) Etag.empty in
+    let #(condition, count) = Etag.parse_match_header (Req.buf req) span tags in
+    (match condition with
+    | Etag.Any -> true  (* "*" always matches *)
+    | Etag.Tags -> Etag.matches_any_weak (Req.buf req) current_etag tags ~count
+    | Etag.Empty -> false)
+  | None -> false
+```
+
+### matches_any_weak
+
+```ocaml
+val matches_any_weak : local_ Base_bigstring.t -> t -> t array -> count:int16# -> bool
+```
+
+Check if an ETag matches any in an array using weak comparison.
+
+<ParamField path="buf" type="Base_bigstring.t" required>
+  Buffer containing all tags (marked as local)
+</ParamField>
+
+<ParamField path="etag" type="t" required>
+  Entity tag to check
+</ParamField>
+
+<ParamField path="tags" type="t array" required>
+  Array of tags to compare against
+</ParamField>
+
+<ParamField path="count" type="int16#" required>
+  Number of valid tags in the array
+</ParamField>
+
+**Returns:** `true` if `etag` weakly matches any tag in the array, `false` otherwise.
+
+### matches_any_strong
+
+```ocaml
+val matches_any_strong : local_ Base_bigstring.t -> t -> t array -> count:int16# -> bool
+```
+
+Check if an ETag matches any in an array using strong comparison.
+
+<ParamField path="buf" type="Base_bigstring.t" required>
+  Buffer containing all tags (marked as local)
+</ParamField>
+
+<ParamField path="etag" type="t" required>
+  Entity tag to check
+</ParamField>
+
+<ParamField path="tags" type="t array" required>
+  Array of tags to compare against
+</ParamField>
+
+<ParamField path="count" type="int16#" required>
+  Number of valid tags in the array
+</ParamField>
+
+**Returns:** `true` if `etag` strongly matches any tag in the array, `false` otherwise.
+
+## Response Writing
+
+### write_etag
+
+```ocaml
+val write_etag : Base_bigstring.t -> off:int16# -> t -> local_ Base_bigstring.t -> int16#
+```
+
+Write `ETag` header to response buffer.
+
+<ParamField path="dst" type="Base_bigstring.t" required>
+  Destination buffer for writing
+</ParamField>
+
+<ParamField path="off" type="int16#" required>
+  Current offset in destination buffer
+</ParamField>
+
+<ParamField path="etag" type="t" required>
+  Entity tag to write
+</ParamField>
+
+<ParamField path="src" type="Base_bigstring.t" required>
+  Source buffer containing the tag value (marked as local)
+</ParamField>
+
+**Returns:** New offset after writing.
+
+**Output format:**
+- Strong: `ETag: "xyzzy"\r\n`
+- Weak: `ETag: W/"xyzzy"\r\n`
+
+**Example:**
+
+```ocaml
+let off = Res.write_status_line buf ~off 200 in
+let off = Etag.write_etag buf ~off resource_etag resource_buf in
+let off = Res.write_content_length buf ~off content_len in
+let off = Res.crlf buf ~off in
+(* ... write body ... *)
+```
+
+### write_etag_string
+
+```ocaml
+val write_etag_string : Base_bigstring.t -> off:int16# -> weak:bool -> string -> int16#
+```
+
+Write `ETag` header from string value (allocates for string).
+
+<ParamField path="dst" type="Base_bigstring.t" required>
+  Destination buffer for writing
+</ParamField>
+
+<ParamField path="off" type="int16#" required>
+  Current offset in destination buffer
+</ParamField>
+
+<ParamField path="weak" type="bool" required>
+  `true` for weak ETag, `false` for strong ETag
+</ParamField>
+
+<ParamField path="tag" type="string" required>
+  Tag value (without quotes)
+</ParamField>
+
+**Returns:** New offset after writing.
+
+**Example:**
+
+```ocaml
+(* Generate ETag from content hash *)
+let content_hash = Digest.string content |> Digest.to_hex in
+let off = Res.write_status_line buf ~off 200 in
+let off = Etag.write_etag_string buf ~off ~weak:false content_hash in
+(* ... continue writing response ... *)
+```
+
+## Utility Functions
+
+### to_string
+
+```ocaml
+val to_string : local_ Base_bigstring.t -> t -> string
+```
+
+Convert ETag to string (allocates). Useful for storage or logging.
+
+<ParamField path="buf" type="Base_bigstring.t" required>
+  Buffer containing the tag value (marked as local)
+</ParamField>
+
+<ParamField path="etag" type="t" required>
+  Entity tag to convert
+</ParamField>
+
+**Returns:** String representation of the tag value (without quotes or W/ prefix).
+
+### pp
+
+```ocaml
+val pp : local_ Base_bigstring.t -> Stdlib.Format.formatter -> t -> unit
+```
+
+Pretty-print ETag in standard format.
+
+## Complete Example: Conditional GET
+
+```ocaml
+(* Handle conditional GET request with ETag validation *)
+let handle_conditional_get req resource =
+  let buf = Req.buf req in
+  let resource_etag = resource.etag in  (* Pre-computed ETag *)
+  
+  (* Check If-None-Match (cache validation) *)
+  let not_modified = match Req.find_header req Header_name.If_none_match with
+  | Some span ->
+    let tags = Array.make (to_int Etag.max_tags) Etag.empty in
+    let #(condition, count) = Etag.parse_match_header buf span tags in
+    (match condition with
+    | Etag.Any -> true
+    | Etag.Tags -> Etag.matches_any_weak buf resource_etag tags ~count
+    | Etag.Empty -> false)
+  | None -> false
+  in
+  
+  if not_modified then
+    (* Send 304 Not Modified *)
+    let off = Res.write_status_line response_buf ~off:(i16 0) 304 in
+    let off = Etag.write_etag response_buf ~off resource_etag buf in
+    let off = Res.crlf response_buf ~off in
+    send_response ~len:off
+  else
+    (* Send full 200 response with content *)
+    let off = Res.write_status_line response_buf ~off:(i16 0) 200 in
+    let off = Etag.write_etag response_buf ~off resource_etag buf in
+    let off = Res.write_content_length response_buf ~off 
+      (i64 (Int64.of_int resource.content_length)) in
+    let off = Res.crlf response_buf ~off in
+    let off = write_body response_buf ~off resource.content in
+    send_response ~len:off
+```

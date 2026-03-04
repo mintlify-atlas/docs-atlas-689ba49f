@@ -1,0 +1,380 @@
+---
+title: Chunked Transfer Encoding
+description: Learn how to parse and write chunked transfer encoding with httpz
+---
+
+## Overview
+
+Chunked transfer encoding allows sending HTTP message bodies of unknown length by breaking them into a series of chunks. Each chunk is sent with its size, allowing the receiver to know when all data has been received.
+
+Httpz provides the `Chunk` module for parsing chunked request bodies and writing chunked responses per [RFC 7230 Section 4.1](https://datatracker.ietf.org/doc/html/rfc7230#section-4.1).
+
+## Detecting Chunked Requests
+
+After parsing a request, check if it uses chunked encoding:
+
+```ocaml
+let #(status, req, headers) = Httpz.parse buf ~len ~limits in
+
+match status with
+| Buf_read.Complete ->
+  if req.#is_chunked then
+    (* Parse chunked body *)
+    parse_chunks buf req
+  else if Int64_u.compare req.#content_length (Int64_u.of_int64 0L) > 0 then
+    (* Fixed-length body *)
+    parse_fixed_body buf req
+  else
+    (* No body *)
+    ()
+| _ -> (* Handle other statuses *)
+```
+
+## Parsing Chunked Bodies
+
+The `Chunk` module provides functions to parse chunks sequentially:
+
+### Chunk Status
+
+```ocaml
+type status =
+  | Complete       (* Chunk parsed successfully *)
+  | Partial        (* Need more data *)
+  | Done           (* Final chunk (zero-length) *)
+  | Malformed      (* Invalid chunk *)
+  | Chunk_too_large  (* Chunk size exceeds limit *)
+```
+
+### Parse Single Chunk
+
+<Steps>
+  <Step title="Initialize offset">
+    Start parsing at the body offset:
+
+    ```ocaml
+    let off = req.#body_off
+    ```
+  </Step>
+
+  <Step title="Parse first chunk">
+    Call `Chunk.parse` to parse a single chunk:
+
+    ```ocaml
+    let #(chunk_status, chunk) = Chunk.parse buf ~off ~len in
+    ```
+
+    The chunk record contains:
+    ```ocaml
+    type t =
+      #{ data_off : int16#   (* Offset of chunk data *)
+       ; data_len : int16#   (* Length of chunk data *)
+       ; next_off : int16#   (* Offset for next chunk *)
+       }
+    ```
+  </Step>
+
+  <Step title="Process chunk data">
+    Extract and process the chunk data:
+
+    ```ocaml
+    match chunk_status with
+    | Chunk.Complete ->
+      (* Extract chunk data *)
+      let chunk_span = Span.make 
+        ~off:chunk.#data_off 
+        ~len:chunk.#data_len in
+      let data = Span.to_string buf chunk_span in
+      process_data data;
+      
+      (* Continue with next chunk *)
+      parse_next_chunk chunk.#next_off
+    
+    | Chunk.Done ->
+      (* Final chunk - no more data *)
+      finish_body ()
+    
+    | Chunk.Partial ->
+      (* Need more data *)
+      read_more_data ()
+    
+    | Chunk.Malformed ->
+      send_400 "Bad Request"
+    
+    | Chunk.Chunk_too_large ->
+      send_413 "Payload Too Large"
+    ```
+  </Step>
+</Steps>
+
+### Complete Parsing Example
+
+```ocaml
+let parse_all_chunks buf req ~len =
+  let rec loop off acc =
+    let #(status, chunk) = Chunk.parse buf ~off ~len in
+    match status with
+    | Chunk.Complete ->
+      (* Extract chunk data *)
+      let chunk_span = Span.make ~off:chunk.#data_off ~len:chunk.#data_len in
+      let data = Span.to_string buf chunk_span in
+      (* Continue with next chunk *)
+      loop chunk.#next_off (data :: acc)
+    
+    | Chunk.Done ->
+      (* All chunks received *)
+      let body = String.concat "" (List.rev acc) in
+      Ok body
+    
+    | Chunk.Partial ->
+      (* Need more data - save state and read more *)
+      Error `Need_more_data
+    
+    | Chunk.Malformed ->
+      Error `Malformed_chunk
+    
+    | Chunk.Chunk_too_large ->
+      Error `Chunk_too_large
+  in
+  loop req.#body_off []
+```
+
+### Parsing with Size Limits
+
+To enforce a maximum chunk size:
+
+```ocaml
+let max_chunk_size = 8_388_608  (* 8MB *)
+
+let #(status, chunk) = 
+  Chunk.parse_with_limit buf ~off ~len ~max_chunk_size
+
+match status with
+| Chunk.Chunk_too_large ->
+  (* Chunk exceeds 8MB limit *)
+  send_413 "Chunk too large"
+| _ -> (* ... *)
+```
+
+<Note>
+  The default maximum chunk size is 16MB (`Chunk.default_max_chunk_size`).
+</Note>
+
+## Trailer Headers
+
+RFC 7230 allows trailer headers after the final chunk:
+
+```
+5\r\n
+Hello\r\n
+0\r\n
+Expires: Wed, 21 Oct 2026 07:28:00 GMT\r\n
+\r\n
+```
+
+### Parsing Trailers
+
+After receiving the final chunk (status = `Done`), parse trailers:
+
+```ocaml
+let parse_with_trailers buf req ~len =
+  let rec parse_chunks off acc =
+    let #(status, chunk) = Chunk.parse buf ~off ~len in
+    match status with
+    | Chunk.Complete ->
+      let data_span = Span.make ~off:chunk.#data_off ~len:chunk.#data_len in
+      let data = Span.to_string buf data_span in
+      parse_chunks chunk.#next_off (data :: acc)
+    
+    | Chunk.Done ->
+      (* Parse trailer headers *)
+      let #(trailer_status, next_off, trailers) =
+        Chunk.parse_trailers buf 
+          ~off:chunk.#next_off 
+          ~len 
+          ~max_header_count:(Buf_read.i16 50)
+      in
+      (match trailer_status with
+       | Chunk.Trailer_complete ->
+         let body = String.concat "" (List.rev acc) in
+         Ok (body, trailers, next_off)
+       | Chunk.Trailer_partial ->
+         Error `Need_more_data
+       | Chunk.Trailer_malformed ->
+         Error `Malformed_trailer)
+    
+    | _ -> Error `Chunk_error
+  in
+  parse_chunks req.#body_off []
+```
+
+### Forbidden Trailer Headers
+
+RFC 7230 forbids certain headers in trailers. Httpz automatically filters these:
+
+```ocaml
+(* Check if a header is forbidden in trailers *)
+if Chunk.is_forbidden_trailer Header_name.Content_length then
+  (* This header is forbidden *)
+  ()
+```
+
+Forbidden headers include:
+- Transfer-Encoding
+- Content-Length
+- Host
+- Headers necessary for message framing or routing
+
+## Writing Chunked Responses
+
+Use the `Res` module functions to write chunked responses:
+
+<Steps>
+  <Step title="Write headers">
+    Write the response headers with `Transfer-Encoding: chunked`:
+
+    ```ocaml
+    let buf = create_response_buffer () in
+    let off = i16 0 in
+    
+    let off = Res.write_status_line buf ~off Res.Success Version.Http_1_1 in
+    let off = Res.write_header_name buf ~off 
+      Header_name.Content_type "text/plain" in
+    let off = Res.write_transfer_encoding_chunked buf ~off in
+    let off = Res.write_connection buf ~off ~keep_alive:true in
+    let off = Res.write_crlf buf ~off in
+    
+    Writer.write_bigstring writer buf ~pos:0 ~len:(to_int off)
+    ```
+  </Step>
+
+  <Step title="Write data chunks">
+    For each chunk of data:
+
+    ```ocaml
+    let send_chunk writer chunk_buf data =
+      let off = i16 0 in
+      
+      (* Write chunk header: "<hex-size>\r\n" *)
+      let off = Res.write_chunk_header chunk_buf ~off 
+        ~size:(String.length data) in
+      Writer.write_bigstring writer chunk_buf ~pos:0 ~len:(to_int off);
+      
+      (* Write chunk data *)
+      Writer.write writer data;
+      
+      (* Write chunk footer: "\r\n" *)
+      let off = i16 0 in
+      let off = Res.write_chunk_footer chunk_buf ~off in
+      Writer.write_bigstring writer chunk_buf ~pos:0 ~len:(to_int off)
+    ```
+  </Step>
+
+  <Step title="Write final chunk">
+    Signal end of body with the final chunk:
+
+    ```ocaml
+    let off = i16 0 in
+    let off = Res.write_final_chunk chunk_buf ~off in
+    Writer.write_bigstring writer chunk_buf ~pos:0 ~len:(to_int off);
+    Writer.flushed writer
+    ```
+
+    This writes `0\r\n\r\n`.
+  </Step>
+</Steps>
+
+### Complete Streaming Example
+
+```ocaml
+let send_chunked_stream writer =
+  let header_buf = create_response_buffer () in
+  let chunk_buf = create_response_buffer () in
+  
+  (* Write headers *)
+  let off = i16 0 in
+  let off = Res.write_status_line header_buf ~off Res.Success Version.Http_1_1 in
+  let off = Res.write_header_name header_buf ~off 
+    Header_name.Content_type "text/plain" in
+  let off = Res.write_transfer_encoding_chunked header_buf ~off in
+  let off = Res.write_connection header_buf ~off ~keep_alive:true in
+  let off = Res.write_crlf header_buf ~off in
+  Writer.write_bigstring writer header_buf ~pos:0 ~len:(to_int off);
+  
+  (* Stream chunks as they become available *)
+  let rec send_chunks () =
+    match get_next_chunk () with
+    | Some data ->
+      (* Write chunk *)
+      let off = i16 0 in
+      let off = Res.write_chunk_header chunk_buf ~off 
+        ~size:(String.length data) in
+      Writer.write_bigstring writer chunk_buf ~pos:0 ~len:(to_int off);
+      Writer.write writer data;
+      
+      let off = i16 0 in
+      let off = Res.write_chunk_footer chunk_buf ~off in
+      Writer.write_bigstring writer chunk_buf ~pos:0 ~len:(to_int off);
+      
+      (* Continue with next chunk *)
+      send_chunks ()
+    
+    | None ->
+      (* Send final chunk *)
+      let off = i16 0 in
+      let off = Res.write_final_chunk chunk_buf ~off in
+      Writer.write_bigstring writer chunk_buf ~pos:0 ~len:(to_int off);
+      Writer.flushed writer
+  in
+  send_chunks ()
+```
+
+## Use Cases
+
+Chunked transfer encoding is useful when:
+
+1. **Unknown content length**: Generating dynamic content where the total size isn't known upfront
+2. **Streaming responses**: Sending data as it becomes available (server-sent events, streaming APIs)
+3. **Large responses**: Breaking large responses into manageable chunks
+4. **Real-time data**: Sending incremental updates to clients
+
+## Chunk Format
+
+The chunk format per RFC 7230:
+
+```
+<chunk-size-in-hex>\r\n
+<chunk-data>\r\n
+<chunk-size-in-hex>\r\n
+<chunk-data>\r\n
+0\r\n
+[trailer-headers]\r\n
+```
+
+Example:
+
+```
+5\r\n
+Hello\r\n
+7\r\n
+, World!\r\n
+0\r\n
+\r\n
+```
+
+## Best Practices
+
+1. **Enforce size limits**: Use `parse_with_limit` to prevent memory exhaustion
+2. **Handle partial data**: Always handle `Partial` status by reading more data
+3. **Validate chunks**: Reject `Malformed` chunks with 400 Bad Request
+4. **Process incrementally**: Don't buffer entire body in memory for large transfers
+5. **Check for trailers**: Use `parse_trailers` after the final chunk if needed
+
+<Warning>
+  Never assume all chunk data fits in the initial buffer. Always handle the `Partial` status correctly.
+</Warning>
+
+## See Also
+
+- [Parsing Requests](/guides/parsing-requests) - Detect chunked requests
+- [Writing Responses](/guides/writing-responses) - Write response headers
+- [Security](/guides/security) - Chunk size limits and validation

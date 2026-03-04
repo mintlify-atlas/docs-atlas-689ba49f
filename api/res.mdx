@@ -1,0 +1,700 @@
+---
+title: Res
+description: HTTP response status codes and writing utilities
+---
+
+The `Res` module provides HTTP response status codes and functions for writing responses to bigstring buffers for zero-copy I/O.
+
+## Status Type
+
+### `status`
+
+```ocaml
+type status =
+  (* 1xx Informational *)
+  | Continue
+  | Switching_protocols
+  (* 2xx Success *)
+  | Success
+  | Created
+  | Accepted
+  | No_content
+  | Partial_content
+  (* 3xx Redirection *)
+  | Moved_permanently
+  | Found
+  | See_other
+  | Not_modified
+  | Temporary_redirect
+  | Permanent_redirect
+  (* 4xx Client Error *)
+  | Bad_request
+  | Unauthorized
+  | Forbidden
+  | Not_found
+  | Method_not_allowed
+  | Not_acceptable
+  | Request_timeout
+  | Conflict
+  | Gone
+  | Length_required
+  | Precondition_failed
+  | Payload_too_large
+  | Uri_too_long
+  | Unsupported_media_type
+  | Range_not_satisfiable
+  | Expectation_failed
+  | Unprocessable_entity
+  | Upgrade_required
+  | Precondition_required
+  | Too_many_requests
+  (* 5xx Server Error *)
+  | Internal_server_error
+  | Not_implemented
+  | Bad_gateway
+  | Service_unavailable
+  | Gateway_timeout
+  | Http_version_not_supported
+```
+
+HTTP response status codes per [RFC 7231 Section 6](https://datatracker.ietf.org/doc/html/rfc7231#section-6).
+
+## Status Constants
+
+### 1xx Informational
+
+<ResponseField name="Continue" type="status">
+  100 - Used for Expect: 100-continue
+</ResponseField>
+
+<ResponseField name="Switching_protocols" type="status">
+  101 - Used for protocol Upgrade
+</ResponseField>
+
+### 2xx Success
+
+<ResponseField name="Success" type="status">
+  200 OK - Standard success response
+</ResponseField>
+
+<ResponseField name="Created" type="status">
+  201 - Resource created successfully
+</ResponseField>
+
+<ResponseField name="Accepted" type="status">
+  202 - Request accepted for processing
+</ResponseField>
+
+<ResponseField name="No_content" type="status">
+  204 - Success with no response body
+</ResponseField>
+
+<ResponseField name="Partial_content" type="status">
+  206 - Used for Range requests
+</ResponseField>
+
+### 3xx Redirection
+
+<ResponseField name="Moved_permanently" type="status">
+  301 - Permanent redirect
+</ResponseField>
+
+<ResponseField name="Found" type="status">
+  302 - Temporary redirect
+</ResponseField>
+
+<ResponseField name="See_other" type="status">
+  303 - Redirect to different URI
+</ResponseField>
+
+<ResponseField name="Not_modified" type="status">
+  304 - Resource not modified (caching)
+</ResponseField>
+
+<ResponseField name="Temporary_redirect" type="status">
+  307 - Temporary redirect preserving method
+</ResponseField>
+
+<ResponseField name="Permanent_redirect" type="status">
+  308 - Permanent redirect preserving method
+</ResponseField>
+
+### 4xx Client Errors
+
+<ResponseField name="Bad_request" type="status">
+  400 - Malformed request
+</ResponseField>
+
+<ResponseField name="Unauthorized" type="status">
+  401 - Authentication required
+</ResponseField>
+
+<ResponseField name="Forbidden" type="status">
+  403 - Access denied
+</ResponseField>
+
+<ResponseField name="Not_found" type="status">
+  404 - Resource not found
+</ResponseField>
+
+<ResponseField name="Method_not_allowed" type="status">
+  405 - HTTP method not allowed
+</ResponseField>
+
+<ResponseField name="Not_acceptable" type="status">
+  406 - Cannot satisfy Accept headers
+</ResponseField>
+
+<ResponseField name="Request_timeout" type="status">
+  408 - Client took too long
+</ResponseField>
+
+<ResponseField name="Conflict" type="status">
+  409 - Request conflicts with current state
+</ResponseField>
+
+<ResponseField name="Gone" type="status">
+  410 - Resource permanently removed
+</ResponseField>
+
+<ResponseField name="Length_required" type="status">
+  411 - Content-Length header required
+</ResponseField>
+
+<ResponseField name="Precondition_failed" type="status">
+  412 - Conditional request failed
+</ResponseField>
+
+<ResponseField name="Payload_too_large" type="status">
+  413 - Request body too large
+</ResponseField>
+
+<ResponseField name="Uri_too_long" type="status">
+  414 - Request URI too long
+</ResponseField>
+
+<ResponseField name="Unsupported_media_type" type="status">
+  415 - Unsupported Content-Type
+</ResponseField>
+
+<ResponseField name="Range_not_satisfiable" type="status">
+  416 - Invalid Range header
+</ResponseField>
+
+<ResponseField name="Expectation_failed" type="status">
+  417 - Expect header cannot be met
+</ResponseField>
+
+<ResponseField name="Unprocessable_entity" type="status">
+  422 - Semantic errors in request
+</ResponseField>
+
+<ResponseField name="Upgrade_required" type="status">
+  426 - Client must upgrade protocol
+</ResponseField>
+
+<ResponseField name="Precondition_required" type="status">
+  428 - Conditional headers required
+</ResponseField>
+
+<ResponseField name="Too_many_requests" type="status">
+  429 - Rate limit exceeded
+</ResponseField>
+
+### 5xx Server Errors
+
+<ResponseField name="Internal_server_error" type="status">
+  500 - Generic server error
+</ResponseField>
+
+<ResponseField name="Not_implemented" type="status">
+  501 - Functionality not supported
+</ResponseField>
+
+<ResponseField name="Bad_gateway" type="status">
+  502 - Invalid response from upstream
+</ResponseField>
+
+<ResponseField name="Service_unavailable" type="status">
+  503 - Server temporarily unavailable
+</ResponseField>
+
+<ResponseField name="Gateway_timeout" type="status">
+  504 - Upstream timeout
+</ResponseField>
+
+<ResponseField name="Http_version_not_supported" type="status">
+  505 - HTTP version not supported
+</ResponseField>
+
+## Status Functions
+
+### `status_code`
+
+```ocaml
+val status_code : status -> int
+```
+
+Get numeric status code.
+
+**Example:**
+
+```ocaml
+status_code Success (* Returns: 200 *)
+status_code Not_found (* Returns: 404 *)
+```
+
+### `status_reason`
+
+```ocaml
+val status_reason : status -> string
+```
+
+Get reason phrase.
+
+**Example:**
+
+```ocaml
+status_reason Success (* Returns: "OK" *)
+status_reason Not_found (* Returns: "Not Found" *)
+```
+
+### `status_to_string`
+
+```ocaml
+val status_to_string : status -> string
+```
+
+Get "CODE Reason" string.
+
+**Example:**
+
+```ocaml
+status_to_string Success (* Returns: "200 OK" *)
+status_to_string Not_found (* Returns: "404 Not Found" *)
+```
+
+### `pp_status`
+
+```ocaml
+val pp_status : Stdlib.Format.formatter -> status -> unit
+```
+
+Pretty-print status.
+
+## Response Writers
+
+All write functions operate on bigstrings (`Base_bigstring.t`) for zero-copy I/O with Async's `Writer.write_bigstring`. They use `int16#` offsets throughout and return the new offset after writing.
+
+### `write_status_line`
+
+```ocaml
+val write_status_line : Base_bigstring.t -> off:int16# -> status -> Version.t -> int16#
+```
+
+Write "HTTP/1.x CODE Reason\r\n" at offset.
+
+<ParamField path="buf" type="Base_bigstring.t">
+  Buffer to write to
+</ParamField>
+
+<ParamField path="off" type="int16#">
+  Offset to write at
+</ParamField>
+
+<ParamField path="status" type="status">
+  HTTP status code
+</ParamField>
+
+<ParamField path="version" type="Version.t">
+  HTTP version (Http_1_0 or Http_1_1)
+</ParamField>
+
+**Returns:** New offset after writing
+
+**Example:**
+
+```ocaml
+let off = Span.of_int 0 in
+let off = Res.write_status_line buf ~off Success Version.Http_1_1 in
+(* Writes: "HTTP/1.1 200 OK\r\n" *)
+```
+
+### `write_header`
+
+```ocaml
+val write_header : Base_bigstring.t -> off:int16# -> string -> string -> int16#
+```
+
+Write "Name: Value\r\n" at offset using string name.
+
+<ParamField path="buf" type="Base_bigstring.t">
+  Buffer to write to
+</ParamField>
+
+<ParamField path="off" type="int16#">
+  Offset to write at
+</ParamField>
+
+<ParamField path="name" type="string">
+  Header name
+</ParamField>
+
+<ParamField path="value" type="string">
+  Header value
+</ParamField>
+
+**Returns:** New offset after writing
+
+**Example:**
+
+```ocaml
+let off = Res.write_header buf ~off "Content-Type" "application/json" in
+(* Writes: "Content-Type: application/json\r\n" *)
+```
+
+### `write_header_int`
+
+```ocaml
+val write_header_int : Base_bigstring.t -> off:int16# -> string -> int -> int16#
+```
+
+Write header with integer value using string name.
+
+<ParamField path="buf" type="Base_bigstring.t">
+  Buffer to write to
+</ParamField>
+
+<ParamField path="off" type="int16#">
+  Offset to write at
+</ParamField>
+
+<ParamField path="name" type="string">
+  Header name
+</ParamField>
+
+<ParamField path="value" type="int">
+  Integer header value
+</ParamField>
+
+**Returns:** New offset after writing
+
+**Example:**
+
+```ocaml
+let off = Res.write_header_int buf ~off "Content-Length" 1024 in
+(* Writes: "Content-Length: 1024\r\n" *)
+```
+
+### `write_header_name`
+
+```ocaml
+val write_header_name : Base_bigstring.t -> off:int16# -> Header_name.t -> string -> int16#
+```
+
+Write "Name: Value\r\n" using typed header name.
+
+<ParamField path="buf" type="Base_bigstring.t">
+  Buffer to write to
+</ParamField>
+
+<ParamField path="off" type="int16#">
+  Offset to write at
+</ParamField>
+
+<ParamField path="name" type="Header_name.t">
+  Typed header name
+</ParamField>
+
+<ParamField path="value" type="string">
+  Header value
+</ParamField>
+
+**Returns:** New offset after writing
+
+**Example:**
+
+```ocaml
+let off = Res.write_header_name buf ~off Header_name.Content_type "text/html" in
+(* Writes: "Content-Type: text/html\r\n" *)
+```
+
+### `write_header_name_int`
+
+```ocaml
+val write_header_name_int : Base_bigstring.t -> off:int16# -> Header_name.t -> int -> int16#
+```
+
+Write header with integer value using typed header name.
+
+<ParamField path="buf" type="Base_bigstring.t">
+  Buffer to write to
+</ParamField>
+
+<ParamField path="off" type="int16#">
+  Offset to write at
+</ParamField>
+
+<ParamField path="name" type="Header_name.t">
+  Typed header name
+</ParamField>
+
+<ParamField path="value" type="int">
+  Integer header value
+</ParamField>
+
+**Returns:** New offset after writing
+
+### `write_crlf`
+
+```ocaml
+val write_crlf : Base_bigstring.t -> off:int16# -> int16#
+```
+
+Write "\r\n".
+
+<ParamField path="buf" type="Base_bigstring.t">
+  Buffer to write to
+</ParamField>
+
+<ParamField path="off" type="int16#">
+  Offset to write at
+</ParamField>
+
+**Returns:** New offset after writing
+
+**Example:**
+
+```ocaml
+(* End of headers *)
+let off = Res.write_crlf buf ~off in
+```
+
+### `write_content_length`
+
+```ocaml
+val write_content_length : Base_bigstring.t -> off:int16# -> int -> int16#
+```
+
+Write "Content-Length: N\r\n".
+
+<ParamField path="buf" type="Base_bigstring.t">
+  Buffer to write to
+</ParamField>
+
+<ParamField path="off" type="int16#">
+  Offset to write at
+</ParamField>
+
+<ParamField path="len" type="int">
+  Content length value
+</ParamField>
+
+**Returns:** New offset after writing
+
+**Example:**
+
+```ocaml
+let off = Res.write_content_length buf ~off 512 in
+(* Writes: "Content-Length: 512\r\n" *)
+```
+
+### `write_connection`
+
+```ocaml
+val write_connection : Base_bigstring.t -> off:int16# -> keep_alive:bool -> int16#
+```
+
+Write "Connection: keep-alive\r\n" or "Connection: close\r\n".
+
+<ParamField path="buf" type="Base_bigstring.t">
+  Buffer to write to
+</ParamField>
+
+<ParamField path="off" type="int16#">
+  Offset to write at
+</ParamField>
+
+<ParamField path="keep_alive" type="bool">
+  Whether to use keep-alive
+</ParamField>
+
+**Returns:** New offset after writing
+
+**Example:**
+
+```ocaml
+let off = Res.write_connection buf ~off ~keep_alive:true in
+(* Writes: "Connection: keep-alive\r\n" *)
+```
+
+## Chunked Transfer Encoding
+
+Functions for writing chunked transfer encoded responses per [RFC 7230 Section 4.1](https://datatracker.ietf.org/doc/html/rfc7230#section-4.1). Use when response body length is unknown at the time headers are sent.
+
+### `write_transfer_encoding_chunked`
+
+```ocaml
+val write_transfer_encoding_chunked : Base_bigstring.t -> off:int16# -> int16#
+```
+
+Write "Transfer-Encoding: chunked\r\n".
+
+<ParamField path="buf" type="Base_bigstring.t">
+  Buffer to write to
+</ParamField>
+
+<ParamField path="off" type="int16#">
+  Offset to write at
+</ParamField>
+
+**Returns:** New offset after writing
+
+### `write_chunk_header`
+
+```ocaml
+val write_chunk_header : Base_bigstring.t -> off:int16# -> size:int -> int16#
+```
+
+Write chunk header `"<hex-size>\r\n"`. Call before writing chunk data.
+
+<ParamField path="buf" type="Base_bigstring.t">
+  Buffer to write to
+</ParamField>
+
+<ParamField path="off" type="int16#">
+  Offset to write at
+</ParamField>
+
+<ParamField path="size" type="int">
+  Size of the chunk data in bytes
+</ParamField>
+
+**Returns:** New offset after writing
+
+### `write_chunk_footer`
+
+```ocaml
+val write_chunk_footer : Base_bigstring.t -> off:int16# -> int16#
+```
+
+Write chunk footer "\r\n" after chunk data.
+
+<ParamField path="buf" type="Base_bigstring.t">
+  Buffer to write to
+</ParamField>
+
+<ParamField path="off" type="int16#">
+  Offset to write at
+</ParamField>
+
+**Returns:** New offset after writing
+
+### `write_final_chunk`
+
+```ocaml
+val write_final_chunk : Base_bigstring.t -> off:int16# -> int16#
+```
+
+Write final chunk "0\r\n\r\n". Call after all data chunks to signal end of body.
+
+<ParamField path="buf" type="Base_bigstring.t">
+  Buffer to write to
+</ParamField>
+
+<ParamField path="off" type="int16#">
+  Offset to write at
+</ParamField>
+
+**Returns:** New offset after writing
+
+## Usage Examples
+
+### Simple Response
+
+```ocaml
+open Httpz
+
+let send_simple_response buf content =
+  let off = Span.of_int 0 in
+  
+  (* Status line *)
+  let off = Res.write_status_line buf ~off Success Version.Http_1_1 in
+  
+  (* Headers *)
+  let off = Res.write_header buf ~off "Content-Type" "text/plain" in
+  let off = Res.write_content_length buf ~off (String.length content) in
+  let off = Res.write_connection buf ~off ~keep_alive:true in
+  
+  (* End headers *)
+  let off = Res.write_crlf buf ~off in
+  
+  (* Body *)
+  let off = Buf_write.string buf ~off content in
+  
+  (* Send response *)
+  Writer.write_bigstring writer buf ~len:(Span.to_int off)
+```
+
+### JSON Response
+
+```ocaml
+let send_json_response buf json_string =
+  let off = Span.of_int 0 in
+  let off = Res.write_status_line buf ~off Success Version.Http_1_1 in
+  let off = Res.write_header_name buf ~off Header_name.Content_type "application/json" in
+  let off = Res.write_content_length buf ~off (String.length json_string) in
+  let off = Res.write_crlf buf ~off in
+  let off = Buf_write.string buf ~off json_string in
+  send_to_client buf ~len:(Span.to_int off)
+```
+
+### Error Response
+
+```ocaml
+let send_error buf status error_msg =
+  let off = Span.of_int 0 in
+  let off = Res.write_status_line buf ~off status Version.Http_1_1 in
+  let off = Res.write_header buf ~off "Content-Type" "text/plain" in
+  let off = Res.write_content_length buf ~off (String.length error_msg) in
+  let off = Res.write_crlf buf ~off in
+  let off = Buf_write.string buf ~off error_msg in
+  send_to_client buf ~len:(Span.to_int off)
+```
+
+### Chunked Response
+
+```ocaml
+let send_chunked_response buf chunks =
+  let off = Span.of_int 0 in
+  
+  (* Headers *)
+  let off = Res.write_status_line buf ~off Success Version.Http_1_1 in
+  let off = Res.write_header buf ~off "Content-Type" "text/plain" in
+  let off = Res.write_transfer_encoding_chunked buf ~off in
+  let off = Res.write_crlf buf ~off in
+  
+  (* Send chunks *)
+  let off = List.fold chunks ~init:off ~f:(fun off chunk ->
+    let off = Res.write_chunk_header buf ~off ~size:(String.length chunk) in
+    let off = Buf_write.string buf ~off chunk in
+    Res.write_chunk_footer buf ~off
+  ) in
+  
+  (* Final chunk *)
+  let off = Res.write_final_chunk buf ~off in
+  
+  send_to_client buf ~len:(Span.to_int off)
+```
+
+### Redirect Response
+
+```ocaml
+let send_redirect buf location =
+  let off = Span.of_int 0 in
+  let off = Res.write_status_line buf ~off Found Version.Http_1_1 in
+  let off = Res.write_header_name buf ~off Header_name.Location location in
+  let off = Res.write_content_length buf ~off 0 in
+  let off = Res.write_crlf buf ~off in
+  send_to_client buf ~len:(Span.to_int off)
+```

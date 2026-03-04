@@ -1,0 +1,391 @@
+---
+title: ETags and Conditional Requests
+description: Learn how to implement ETags and conditional requests for efficient caching with httpz
+---
+
+## Overview
+
+Entity tags (ETags) are opaque validators used for conditional requests, enabling efficient caching and bandwidth savings. Httpz provides the `Etag` module for parsing, comparing, and writing ETags per [RFC 7232](https://datatracker.ietf.org/doc/html/rfc7232).
+
+## ETag Types
+
+ETags can be strong or weak:
+
+```ocaml
+(* Strong ETag: "xyzzy" *)
+#{ weak = false; off = ...; len = ... }
+
+(* Weak ETag: W/"xyzzy" *)
+#{ weak = true; off = ...; len = ... }
+```
+
+### Strong vs Weak ETags
+
+- **Strong ETags**: Byte-for-byte identical resources. Required for range requests.
+- **Weak ETags**: Semantically equivalent resources. Use `W/` prefix (e.g., `W/"abc123"`).
+
+## Generating ETags
+
+Common strategies for generating ETags:
+
+### From File Metadata
+
+```ocaml
+(* Weak ETag from modification time and size *)
+let generate_weak_etag ~mtime ~size =
+  let mtime_ms = int_of_float (mtime *. 1000.0) in
+  sprintf "W/\"%x-%Lx\"" mtime_ms size
+
+(* Example: W/"18f4e2c8b-4a3" *)
+let etag = generate_weak_etag 
+  ~mtime:1234567890.5 
+  ~size:1234L
+```
+
+### From Content Hash
+
+```ocaml
+(* Strong ETag from content hash *)
+let generate_strong_etag content =
+  let hash = Digest.string content |> Digest.to_hex in
+  sprintf "\"%s\"" hash
+
+(* Example: "5d41402abc4b2a76b9719d911017c592" *)
+```
+
+## Parsing ETags
+
+Parse a single ETag from a header value:
+
+```ocaml
+let parse_etag_header buf headers =
+  match Header.find headers Header_name.Etag with
+  | None -> None
+  | Some hdr ->
+    let #(status, etag) = Etag.parse buf hdr.value in
+    match status with
+    | Etag.Valid -> Some etag
+    | Etag.Invalid -> None
+```
+
+### ETag Record
+
+```ocaml
+type t =
+  #{ weak : bool     (* true if prefixed with W/ *)
+   ; off : int16#    (* Offset of tag content (after quote) *)
+   ; len : int16#    (* Length of tag content (excluding quotes) *)
+   }
+```
+
+The offset and length reference the opaque tag value within the buffer, excluding quotes.
+
+## Conditional Requests
+
+### If-None-Match
+
+Used for cache validation and avoiding redundant transfers:
+
+```ocaml
+let handle_if_none_match buf headers ~current_etag =
+  match Header.find headers Header_name.If_none_match with
+  | None ->
+    (* No condition - serve full content *)
+    `Serve_full
+  
+  | Some hdr ->
+    (* Parse If-None-Match header *)
+    let tags = Array.create ~len:(to_int Etag.max_tags) Etag.empty in
+    let #(condition, count) = Etag.parse_match_header buf hdr.value tags in
+    
+    match condition with
+    | Etag.Any ->
+      (* "*" matches any entity *)
+      `Send_304
+    
+    | Etag.Tags ->
+      (* Check if current ETag matches any listed tag (weak comparison) *)
+      if Etag.matches_any_weak buf current_etag tags ~count then
+        `Send_304  (* Not modified *)
+      else
+        `Serve_full  (* Modified - serve full content *)
+    
+    | Etag.Empty ->
+      (* No valid tags - serve full content *)
+      `Serve_full
+```
+
+### If-Match
+
+Used for conditional updates and avoiding lost updates:
+
+```ocaml
+let handle_if_match buf headers ~current_etag =
+  match Header.find headers Header_name.If_match with
+  | None ->
+    (* No condition - proceed with update *)
+    `Proceed
+  
+  | Some hdr ->
+    let tags = Array.create ~len:(to_int Etag.max_tags) Etag.empty in
+    let #(condition, count) = Etag.parse_match_header buf hdr.value tags in
+    
+    match condition with
+    | Etag.Any ->
+      (* "*" matches if resource exists *)
+      `Proceed
+    
+    | Etag.Tags ->
+      (* Strong comparison required for updates *)
+      if Etag.matches_any_strong buf current_etag tags ~count then
+        `Proceed
+      else
+        `Send_412  (* Precondition failed *)
+    
+    | Etag.Empty ->
+      `Send_412
+```
+
+## ETag Comparison
+
+### Weak Comparison
+
+For cache validation (If-None-Match):
+
+```ocaml
+(* Compare two ETags weakly *)
+let matches = Etag.weak_match buf etag1 etag2 in
+
+(* Check if matches any in array *)
+let matches = Etag.matches_any_weak buf current_etag tag_array ~count
+```
+
+Weak comparison ignores the weak flag and compares only the opaque values.
+
+### Strong Comparison
+
+For range requests and conditional updates:
+
+```ocaml
+(* Compare two ETags strongly *)
+let matches = Etag.strong_match buf etag1 etag2 in
+
+(* Check if matches any in array *)
+let matches = Etag.matches_any_strong buf current_etag tag_array ~count
+```
+
+Strong comparison requires both tags to be strong and have identical opaque values.
+
+<Warning>
+  Use strong comparison for range requests. Weak ETags must not be used with byte range requests.
+</Warning>
+
+## Writing ETags
+
+### Write ETag Header
+
+```ocaml
+(* Write ETag from parsed tag *)
+let off = Etag.write_etag response_buf ~off etag source_buf in
+
+(* Write ETag from string *)
+let off = Etag.write_etag_string response_buf ~off 
+  ~weak:true "abc123" in
+(* Writes: ETag: W/"abc123"\r\n *)
+
+let off = Etag.write_etag_string response_buf ~off 
+  ~weak:false "def456" in
+(* Writes: ETag: "def456"\r\n *)
+```
+
+## 304 Not Modified Response
+
+When a conditional GET matches:
+
+```ocaml
+let send_304_not_modified writer ~etag ~last_modified =
+  let buf = create_response_buffer () in
+  let off = i16 0 in
+  
+  (* Status line *)
+  let off = Res.write_status_line buf ~off Res.Not_modified Version.Http_1_1 in
+  
+  (* ETag header *)
+  let off = Etag.write_etag_string buf ~off ~weak:true etag in
+  
+  (* Last-Modified header *)
+  let off = Date.write_last_modified buf ~off 
+    (Float_u.of_float last_modified) in
+  
+  (* Date and connection *)
+  let off = Date.write_date_header buf ~off (Float_u.of_float (Unix.gettimeofday ())) in
+  let off = Res.write_connection buf ~off ~keep_alive:true in
+  let off = Res.write_crlf buf ~off in
+  
+  Writer.write_bigstring writer buf ~pos:0 ~len:(to_int off);
+  Writer.flushed writer
+```
+
+## 412 Precondition Failed Response
+
+When If-Match fails:
+
+```ocaml
+let send_412_precondition_failed writer =
+  let buf = create_response_buffer () in
+  let message = "Precondition Failed" in
+  let off = i16 0 in
+  
+  let off = Res.write_status_line buf ~off Res.Precondition_failed Version.Http_1_1 in
+  let off = Res.write_header_name buf ~off 
+    Header_name.Content_type "text/plain" in
+  let off = Res.write_content_length buf ~off (String.length message) in
+  let off = Res.write_connection buf ~off ~keep_alive:true in
+  let off = Res.write_crlf buf ~off in
+  
+  Writer.write_bigstring writer buf ~pos:0 ~len:(to_int off);
+  Writer.write writer message;
+  Writer.flushed writer
+```
+
+## Complete Example
+
+```ocaml
+let handle_conditional_get writer buf headers ~file_path ~file_meta =
+  let { size; mtime; etag; content_type } = file_meta in
+  
+  (* Parse current ETag *)
+  let current_etag_str = generate_weak_etag ~mtime ~size in
+  let etag_buf = create_buffer () in
+  Bigstring.From_string.blit ~src:current_etag_str ~dst:etag_buf ();
+  let etag_span = Span.make ~off:(i16 0) 
+    ~len:(i16 (String.length current_etag_str)) in
+  let #(_, current_etag) = Etag.parse etag_buf etag_span in
+  
+  (* Check If-None-Match *)
+  let should_send_304 =
+    match Header.find headers Header_name.If_none_match with
+    | None -> false
+    | Some hdr ->
+      let tags = Array.create ~len:(to_int Etag.max_tags) Etag.empty in
+      let #(condition, count) = Etag.parse_match_header buf hdr.value tags in
+      
+      match condition with
+      | Etag.Any -> true
+      | Etag.Tags -> Etag.matches_any_weak buf current_etag tags ~count
+      | Etag.Empty -> false
+  in
+  
+  if should_send_304 then
+    send_304_not_modified writer ~etag:current_etag_str ~last_modified:mtime
+  else (
+    (* Send full response with ETag *)
+    let response_buf = create_response_buffer () in
+    let off = i16 0 in
+    
+    let off = Res.write_status_line response_buf ~off Res.Success Version.Http_1_1 in
+    let off = Res.write_header_name response_buf ~off 
+      Header_name.Content_type content_type in
+    let off = Res.write_content_length response_buf ~off 
+      (Int64.to_int_exn size) in
+    let off = Etag.write_etag_string response_buf ~off 
+      ~weak:true current_etag_str in
+    let off = Date.write_last_modified response_buf ~off 
+      (Float_u.of_float mtime) in
+    let off = Range.write_accept_ranges response_buf ~off in
+    let off = Res.write_connection response_buf ~off ~keep_alive:true in
+    let off = Res.write_crlf response_buf ~off in
+    
+    Writer.write_bigstring writer response_buf ~pos:0 ~len:(to_int off);
+    stream_file writer file_path
+  )
+```
+
+## Combining ETags with Range Requests
+
+When using ETags with range requests:
+
+```ocaml
+let handle_range_with_etag buf headers ~file_meta =
+  let { size; mtime; etag; _ } = file_meta in
+  
+  (* Check If-Range header *)
+  match Header.find headers Header_name.If_range with
+  | Some hdr ->
+    (* Parse If-Range value (can be ETag or date) *)
+    let #(status, if_range_etag) = Etag.parse buf hdr.value in
+    
+    (match status with
+     | Etag.Valid ->
+       (* Current ETag for the resource *)
+       let current_etag = (* ... parse current etag ... *) in
+       
+       (* Use STRONG comparison for range requests *)
+       if Etag.strong_match buf current_etag if_range_etag then
+         (* ETags match - serve range *)
+         serve_range ()
+       else
+         (* ETags don't match - serve full content *)
+         serve_full_content ()
+     
+     | Etag.Invalid ->
+       (* Might be a date - parse as date instead *)
+       (* ... *)
+    )
+  
+  | None ->
+    (* No If-Range - just serve the range *)
+    serve_range ()
+```
+
+<Note>
+  If-Range allows a client to request a range only if the entity hasn't changed. If the ETag doesn't match, the server sends the entire resource.
+</Note>
+
+## Best Practices
+
+1. **Choose appropriate strength**:
+   - Use weak ETags for dynamic content where byte-for-byte equality isn't important
+   - Use strong ETags for static files and when supporting range requests
+
+2. **Consistent generation**: Always generate the same ETag for the same resource state
+
+3. **Include Last-Modified**: Send both ETag and Last-Modified headers for maximum compatibility
+
+4. **Validate properly**:
+   - Use weak comparison for If-None-Match (cache validation)
+   - Use strong comparison for If-Match (update protection) and If-Range
+
+5. **Handle wildcards**: Support `"*"` in If-Match and If-None-Match
+
+6. **Minimize allocations**: Parse ETags directly from buffer without string round-trips when possible
+
+## Common ETag Patterns
+
+### Cache Validation Flow
+
+```
+Client → Server: GET /file
+                  If-None-Match: W/"abc123"
+
+Server → Client: 304 Not Modified
+                  ETag: W/"abc123"
+                  (no body)
+```
+
+### Conditional Update Flow
+
+```
+Client → Server: PUT /resource
+                  If-Match: "xyz789"
+                  (request body)
+
+Server → Client: 412 Precondition Failed
+                  (ETag changed - update conflict)
+```
+
+## See Also
+
+- [Writing Responses](/guides/writing-responses) - HTTP response basics
+- [Range Requests](/guides/range-requests) - Combining ETags with ranges
+- [Parsing Requests](/guides/parsing-requests) - Reading request headers

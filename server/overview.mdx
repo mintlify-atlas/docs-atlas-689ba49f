@@ -1,0 +1,213 @@
+---
+title: Static File Server
+description: High-performance Async static file server with zero-copy I/O and advanced HTTP features
+---
+
+## Overview
+
+httpz includes a production-ready static file server built with OCaml's Async library. The server demonstrates httpz's capabilities while providing a fast, feature-rich solution for serving static content.
+
+<Info>
+The server can handle up to 10,000 concurrent connections with efficient zero-copy bigstring I/O.
+</Info>
+
+## Key Features
+
+<CardGroup cols={2}>
+  <Card title="Async I/O" icon="bolt">
+    Non-blocking concurrent connection handling using OCaml Async
+  </Card>
+  <Card title="Zero-Copy I/O" icon="memory">
+    Direct bigstring I/O without intermediate copying
+  </Card>
+  <Card title="MIME Types" icon="file-code">
+    Automatic content type detection for common file extensions
+  </Card>
+  <Card title="Security" icon="shield">
+    Directory traversal protection and path normalization
+  </Card>
+</CardGroup>
+
+## Advanced HTTP Features
+
+The server implements several modern HTTP/1.1 features:
+
+### Range Requests (HTTP 206)
+
+Supports byte-range requests for partial content delivery, enabling:
+- Resume interrupted downloads
+- Stream specific portions of media files
+- Efficient large file serving
+
+```ocaml
+(* Range header parsing - zero string allocations *)
+let range_count =
+  match Httpz.Header.find headers Httpz.Header_name.Range with
+  | None -> 0
+  | Some hdr ->
+    let #(status, count) = Httpz.Range.parse buf hdr.value conn.ranges in
+    match status with
+    | Httpz.Range.Invalid -> 0
+    | Httpz.Range.Valid -> to_int count
+```
+
+### Conditional Requests
+
+The server supports efficient caching with ETags and conditional GETs:
+
+- **ETag generation**: Weak ETags based on file modification time and size
+- **If-None-Match**: Returns 304 Not Modified when content hasn't changed
+- **Last-Modified**: Provides modification timestamp headers
+
+```ocaml
+(* Generate weak ETag from file stats: W/"mtime-size" *)
+let generate_etag ~(mtime : float) ~(size : int64) : string =
+  sprintf "W/\"%x-%Lx\"" (Float.to_int (mtime *. 1000.0)) size
+```
+
+### Keep-Alive Connections
+
+Persistent connections are automatically managed for improved performance:
+
+```ocaml
+type conn_state =
+  { reader : Reader.t
+  ; writer : Writer.t
+  ; read_buf : Httpz.buffer
+  ; write_buf : Httpz.buffer
+  ; mutable read_len : int
+  ; mutable keep_alive : bool
+  (* ... *)
+  }
+```
+
+## MIME Type Detection
+
+The server automatically detects content types for common file extensions:
+
+<AccordionGroup>
+  <Accordion title="Web Content">
+    - HTML: `text/html`
+    - CSS: `text/css`
+    - JavaScript: `application/javascript`
+    - JSON: `application/json`
+  </Accordion>
+  
+  <Accordion title="Images">
+    - PNG: `image/png`
+    - JPEG: `image/jpeg`
+    - GIF: `image/gif`
+    - SVG: `image/svg+xml`
+    - ICO: `image/x-icon`
+  </Accordion>
+  
+  <Accordion title="Fonts">
+    - WOFF: `font/woff`
+    - WOFF2: `font/woff2`
+    - TTF: `font/ttf`
+  </Accordion>
+  
+  <Accordion title="Source Code">
+    - OCaml: `text/x-ocaml`
+    - C/C++: `text/x-c`
+    - Python: `text/x-python`
+    - Shell: `text/x-shellscript`
+  </Accordion>
+</AccordionGroup>
+
+## Security Features
+
+### Directory Traversal Protection
+
+The server normalizes paths and ensures all file access stays within the served root directory:
+
+```ocaml
+(* Normalize path - remove .. and resolve to absolute within root *)
+let normalize_path ~root request_path =
+  let decoded = request_path in
+  let parts = String.split decoded ~on:'/' in
+  let rec resolve acc = function
+    | [] -> List.rev acc
+    | "" :: rest | "." :: rest -> resolve acc rest
+    | ".." :: rest ->
+      (match acc with
+       | [] -> resolve [] rest
+       | _ :: acc' -> resolve acc' rest)
+    | part :: rest -> resolve (part :: acc) rest
+  in
+  let normalized = resolve [] parts in
+  let relative = String.concat ~sep:"/" normalized in
+  Filename.concat root relative
+```
+
+<Warning>
+The server uses `realpath` verification to prevent symbolic link attacks and ensures all served files are within the configured root directory.
+</Warning>
+
+### Realpath Verification
+
+Before serving files, the server verifies they're within the allowed root:
+
+```ocaml
+let serve_regular_file conn ~root_abs ~file_path ~req_headers ~version =
+  let%bind result =
+    Monitor.try_with (fun () ->
+      let file_abs = Filename_unix.realpath file_path in
+      if String.is_prefix file_abs ~prefix:root_abs
+      then (* Serve file *)
+      else return None)
+  in
+  (* ... *)
+```
+
+## Directory Index
+
+When accessing a directory, the server automatically looks for `index.html`:
+
+```ocaml
+let serve_directory conn ~file_path ~req_headers ~version =
+  let index_path = Filename.concat file_path "index.html" in
+  let%bind index_status = Sys.file_exists index_path in
+  match index_status with
+  | `Yes ->
+    let%bind meta = get_file_meta index_path in
+    send_file_with_meta conn ~file_path:index_path ~meta ~req_headers ~version
+  | `No | `Unknown ->
+    send_error conn Httpz.Res.Not_found "Not Found" version
+```
+
+## Performance Characteristics
+
+<Note>
+The server supports up to 10,000 concurrent connections with a backlog of 128 pending connections.
+</Note>
+
+### Buffer Configuration
+
+- **Request buffer**: 32KB (configurable via `Httpz.buffer_size`)
+- **Response buffer**: 64KB for headers
+- **Zero-copy streaming**: File contents streamed directly to writer
+
+```ocaml
+(* Res buffer size - 64KB for headers *)
+let response_buffer_size = 65536
+
+(* Stream file contents without intermediate copying *)
+let%bind fd = Unix.openfile file_path ~mode:[`Rdonly] in
+let%bind () = Writer.transfer conn.writer
+  (Reader.pipe (Reader.create fd))
+  (fun s -> Writer.write conn.writer s)
+in
+Writer.flushed conn.writer
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Configuration" icon="gear" href="/server/configuration">
+    Learn how to configure the server with command-line options
+  </Card>
+  <Card title="HTTP Parser" icon="code" href="/api/parser">
+    Understand the underlying zero-allocation parser
+  </Card>
+</CardGroup>

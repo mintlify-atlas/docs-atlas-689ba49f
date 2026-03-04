@@ -1,80 +1,379 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: Quick Start
+description: Parse your first HTTP request with zero allocations using httpz
 ---
 
-## Get started in three steps
+# Quick Start
 
-Get your documentation site running locally and make your first customization.
+This guide shows you how to parse HTTP/1.1 requests using httpz with **zero heap allocations**. You'll learn the fundamental concepts and see real examples from the source code.
 
-### Step 1: Set up your local environment
+## Basic Request Parsing
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+Here's a minimal example that parses an HTTP GET request:
 
-### Step 2: Deploy your changes
+```ocaml
+open Base
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+let parse_request request_string =
+  (* Create a 32KB buffer - allocate once, reuse for all requests *)
+  let buf = Httpz.create_buffer () in
+  
+  (* Copy request into buffer *)
+  let len = String.length request_string in
+  for i = 0 to len - 1 do
+    Bigarray.Array1.set buf i (String.get request_string i)
+  done;
+  
+  (* Parse with default security limits *)
+  let #(status, req, headers) = 
+    Httpz.parse buf 
+      ~len:(Httpz.Buf_read.i16 len) 
+      ~limits:Httpz.default_limits 
+  in
+  
+  (* Check if parsing succeeded *)
+  match status with
+  | Httpz.Buf_read.Complete ->
+      (* Access request fields from unboxed record *)
+      Stdio.printf "Method: %s\n" (Httpz.Method.to_string req.#meth);
+      Stdio.printf "Target: %s\n" (Httpz.Span.to_string buf req.#target);
+      Stdio.printf "Version: HTTP/%s\n" 
+        (match req.#version with
+         | Httpz.Version.Http_1_0 -> "1.0"
+         | Httpz.Version.Http_1_1 -> "1.1");
+      
+      (* Iterate headers *)
+      List.iter headers ~f:(fun hdr ->
+        let name = match hdr.Httpz.Header.name with
+          | Httpz.Header.Name.Host -> "Host"
+          | Httpz.Header.Name.Content_type -> "Content-Type"
+          | Httpz.Header.Name.Other -> 
+              Httpz.Span.to_string buf hdr.Httpz.Header.name_span
+          | _ -> "<other>"
+        in
+        let value = Httpz.Span.to_string buf hdr.Httpz.Header.value in
+        Stdio.printf "  %s: %s\n" name value
+      )
+  
+  | Httpz.Buf_read.Partial -> 
+      Stdio.print_endline "Need more data"
+  
+  | _ -> 
+      Stdio.printf "Parse error: %s\n" 
+        (Httpz.Buf_read.status_to_string status)
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+let () =
+  let request = "GET /index.html HTTP/1.1\r\nHost: example.com\r\n\r\n" in
+  parse_request request
+```
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+<Info>
+The `#(status, req, headers)` syntax destructures an **unboxed tuple** returned by the parser. All values are stack-allocated.
+</Info>
 
-### Step 3: Go live
+## Understanding the Parse Result
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+The `Httpz.parse` function returns an unboxed tuple with three components:
 
-## Next steps
+```ocaml
+val parse : 
+  buffer -> 
+  len:int16# -> 
+  limits:limits -> 
+  #(Buf_read.status * Req.t * Header.t list) @ local
+```
 
-Now that you have your docs running, explore these key features:
+### 1. Status
 
-<CardGroup cols={2}>
+The `status` indicates whether parsing succeeded:
 
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
+```ocaml
+type status =
+  | Complete                    (* Parsing succeeded *)
+  | Partial                     (* Need more data *)
+  | Invalid_method              (* Unknown HTTP method *)
+  | Invalid_target              (* Malformed request target *)
+  | Invalid_version             (* Not HTTP/1.0 or HTTP/1.1 *)
+  | Invalid_header              (* Malformed header *)
+  | Headers_too_large           (* Exceeded header size limit *)
+  | Content_length_overflow     (* Content-Length too large *)
+  | Ambiguous_framing           (* Both Content-Length and Transfer-Encoding *)
+  | Bare_cr_detected            (* Security: CR without LF *)
+  | Missing_host_header         (* HTTP/1.1 requires Host *)
+  (* ... and more *)
+```
 
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
+### 2. Request Record
 
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
+The `req` is an **unboxed record** containing parsed request data:
 
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
-</CardGroup>
+```ocaml
+type req = #{
+  meth : Method.t;              (* GET, POST, PUT, etc. *)
+  target : Span.t;              (* Request target as span into buffer *)
+  version : Version.t;          (* HTTP/1.0 or HTTP/1.1 *)
+  body_off : int16#;            (* Offset where body starts *)
+  content_length : int64#;      (* Content-Length value, -1 if absent *)
+  is_chunked : bool;            (* Transfer-Encoding: chunked *)
+  keep_alive : bool;            (* Connection: keep-alive *)
+  expect_continue : bool;       (* Expect: 100-continue *)
+}
+```
 
 <Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
+Content headers (Content-Length, Transfer-Encoding, Connection, Expect) are **cached in the request struct** and excluded from the header list for efficiency.
 </Note>
+
+### 3. Header List
+
+The `headers` is a **local list** (stack-allocated) of parsed headers:
+
+```ocaml
+type header = {
+  name : Header_name.t;         (* Typed header name *)
+  name_span : Span.t;           (* Span for unknown headers *)
+  value : Span.t;               (* Header value as span *)
+}
+```
+
+## Working with Spans
+
+Spans are httpz's zero-allocation approach to strings. A span is just an offset and length into the buffer:
+
+```ocaml
+type span = #{ off : int16#; len : int16# }
+```
+
+### Comparing Spans
+
+```ocaml
+(* Case-sensitive comparison *)
+if Httpz.Span.equal buf req.#target "/api/users" then
+  Stdio.print_endline "Matched /api/users";
+
+(* Case-insensitive comparison *)
+if Httpz.Span.equal_caseless buf header.value "application/json" then
+  Stdio.print_endline "JSON content type"
+```
+
+### Converting Spans to Strings
+
+<Warning>
+`Span.to_string` allocates a new string. Use it only when you need to store or return the value.
+</Warning>
+
+```ocaml
+(* This allocates - avoid in hot paths *)
+let target_string = Httpz.Span.to_string buf req.#target in
+Stdio.printf "Target: %s\n" target_string
+
+(* Better: compare directly without allocating *)
+if Httpz.Span.equal buf req.#target "/" then
+  serve_index_page ()
+```
+
+## Parsing POST with Body
+
+Here's how to handle a POST request with a body:
+
+```ocaml
+let handle_post buf len =
+  let #(status, req, headers) = 
+    Httpz.parse buf ~len:(Httpz.Buf_read.i16 len) ~limits:Httpz.default_limits
+  in
+  
+  match status with
+  | Httpz.Buf_read.Complete ->
+      (* Check if body is completely in buffer *)
+      if Httpz.Req.body_in_buffer ~len:(Httpz.Buf_read.i16 len) req then (
+        (* Get body as span *)
+        let body = Httpz.Req.body_span ~len:(Httpz.Buf_read.i16 len) req in
+        
+        (* Access body content directly from buffer *)
+        let body_str = Httpz.Span.to_string buf body in
+        Stdio.printf "Body: %s\n" body_str;
+      ) else (
+        (* Need more data *)
+        let needed = Httpz.Req.body_bytes_needed 
+          ~len:(Httpz.Buf_read.i16 len) req 
+        in
+        Stdio.printf "Need %d more bytes\n" (Httpz.Buf_read.to_int needed)
+      )
+  
+  | _ -> 
+      Stdio.printf "Parse error: %s\n" (Httpz.Buf_read.status_to_string status)
+```
+
+## Finding Headers
+
+You can search for headers by name:
+
+```ocaml
+let find_content_type headers buf =
+  (* Find by known header name *)
+  match Httpz.Header.find headers Httpz.Header.Name.Content_type with
+  | Some hdr -> 
+      Stdio.printf "Content-Type: %s\n" 
+        (Httpz.Span.to_string buf hdr.Httpz.Header.value)
+  | None -> 
+      Stdio.print_endline "No Content-Type header"
+
+let find_custom_header headers buf =
+  (* Find by string name (case-insensitive) *)
+  match Httpz.Header.find_string buf headers "X-Custom-Header" with
+  | Some hdr ->
+      Stdio.printf "X-Custom-Header: %s\n" 
+        (Httpz.Span.to_string buf hdr.Httpz.Header.value)
+  | None ->
+      Stdio.print_endline "No X-Custom-Header"
+```
+
+## Handling Chunked Encoding
+
+For requests with `Transfer-Encoding: chunked`:
+
+```ocaml
+let handle_chunked req buf =
+  if req.#is_chunked then (
+    Stdio.print_endline "Request uses chunked encoding";
+    (* Use Httpz.Chunk.parse to read chunks *)
+    (* See Chunk module documentation for details *)
+  )
+```
+
+## Complete Example from Test Suite
+
+Here's a real example from httpz's test suite:
+
+```ocaml
+let test_simple_get () =
+  let buf = Httpz.create_buffer () in
+  let request =
+    "GET /index.html HTTP/1.1\r\n" ^
+    "Host: example.com\r\n" ^
+    "Content-Length: 0\r\n\r\n"
+  in
+  
+  (* Copy request to buffer *)
+  let len = String.length request in
+  for i = 0 to len - 1 do
+    Bigarray.Array1.set buf i (String.get request i)
+  done;
+  
+  (* Parse *)
+  let #(status, req, headers) = 
+    Httpz.parse buf 
+      ~len:(Httpz.Buf_read.i16 len) 
+      ~limits:Httpz.default_limits 
+  in
+  
+  (* Verify parsing succeeded *)
+  assert (Poly.( = ) status Httpz.Buf_read.Complete);
+  
+  (* Verify method *)
+  assert (Poly.( = ) req.#meth Httpz.Method.Get);
+  
+  (* Verify target *)
+  assert (Httpz.Span.equal buf req.#target "/index.html");
+  
+  (* Verify version *)
+  assert (Poly.( = ) req.#version Httpz.Version.Http_1_1);
+  
+  (* Content-Length is cached in request struct (not in headers) *)
+  assert (Stdlib_upstream_compatible.Int64_u.equal req.#content_length #0L);
+  
+  (* Only Host header remains in list *)
+  assert (List.length headers = 1);
+  
+  match headers with
+  | [ hdr ] ->
+      assert (Poly.( = ) hdr.Httpz.Header.name Httpz.Header.Name.Host);
+      assert (Httpz.Span.equal buf hdr.Httpz.Header.value "example.com")
+  | _ -> assert false
+```
+
+## Security Limits
+
+httpz provides configurable security limits:
+
+```ocaml
+type limits = #{
+  max_content_length : int64#;  (* Default: 100MB *)
+  max_header_size : int16#;     (* Default: 16KB *)
+  max_header_count : int16#;    (* Default: 100 headers *)
+  max_chunk_size : int;         (* Default: 16MB *)
+}
+
+(* Use default limits *)
+let limits = Httpz.default_limits
+
+(* Or customize *)
+let custom_limits = #{
+  max_content_length = #10_485_760L;  (* 10MB *)
+  max_header_size = Httpz.Buf_read.i16 8192;  (* 8KB *)
+  max_header_count = Httpz.Buf_read.i16 50;
+  max_chunk_size = 1048576;  (* 1MB *)
+}
+```
+
+<Warning>
+Always validate Content-Length against your limits. The parser will reject requests exceeding `max_content_length` with `Content_length_overflow` status.
+</Warning>
+
+## Key Concepts Summary
+
+<Steps>
+  <Step title="Create a buffer once">
+    Allocate a 32KB buffer with `Httpz.create_buffer ()` and reuse it for multiple requests.
+  </Step>
+  
+  <Step title="Parse returns unboxed tuple">
+    Destructure with `let #(status, req, headers) = Httpz.parse ...` to get stack-allocated results.
+  </Step>
+  
+  <Step title="Use spans, not strings">
+    Compare spans directly with `Span.equal` or `Span.equal_caseless` to avoid allocations.
+  </Step>
+  
+  <Step title="Check status first">
+    Always check `status` before accessing `req` or `headers`. Handle `Partial`, errors, and security violations.
+  </Step>
+  
+  <Step title="Content headers are cached">
+    Content-Length, Transfer-Encoding, Connection, and Expect are in `req`, not in the `headers` list.
+  </Step>
+</Steps>
+
+## Performance Tips
+
+<CardGroup cols={2}>
+  <Card title="Reuse Buffers" icon="recycle">
+    Create the buffer once and reuse it across requests. This is the key to zero allocation.
+  </Card>
+  
+  <Card title="Avoid to_string" icon="ban">
+    Only convert spans to strings when absolutely necessary. Use `Span.equal` for comparisons.
+  </Card>
+  
+  <Card title="Use Local Annotation" icon="layer-group">
+    Mark functions with `@ local` when working with unboxed values to maintain stack discipline.
+  </Card>
+  
+  <Card title="Thread Position" icon="arrow-right">
+    Parser combinators thread position explicitly—this enables zero allocation but requires care.
+  </Card>
+</CardGroup>
+
+## Next Steps
+
+Now that you understand the basics, explore:
+
+- **Response Writing**: Use `Httpz.Res` and `Httpz.Buf_write` to generate responses
+- **Chunked Encoding**: Handle chunked transfer encoding with `Httpz.Chunk`
+- **Range Requests**: Implement partial content with `Httpz.Range`
+- **Static File Server**: Study `bin/httpz_server.ml` for a production example
+- **Parser Combinators**: Build custom parsers with `Httpz.Parser` module
+
+<Card title="View Source on GitHub" icon="github" href="https://github.com/avsm/httpz">
+  Explore the full source code and examples
+</Card>

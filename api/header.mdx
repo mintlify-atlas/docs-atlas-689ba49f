@@ -1,0 +1,292 @@
+---
+title: Header
+description: HTTP header type and lookup operations
+---
+
+The `Header` module provides types and functions for working with parsed HTTP headers.
+
+## Type Definition
+
+### `t`
+
+```ocaml
+type t =
+  { name : Name.t
+  ; name_span : Span.t
+  ; value : Span.t
+  }
+```
+
+Parsed header. Stored in local list - stack allocated, no heap allocation. The `name_span` field is only meaningful when `name = Other`.
+
+<ResponseField name="name" type="Name.t">
+  Typed header name (e.g., `Content_type`, `Authorization`, or `Other` for unknown headers)
+</ResponseField>
+
+<ResponseField name="name_span" type="Span.t">
+  Span pointing to the header name in the buffer. Only used when `name = Other` to access the actual header name string.
+</ResponseField>
+
+<ResponseField name="value" type="Span.t">
+  Span pointing to the header value in the buffer
+</ResponseField>
+
+## Module Alias
+
+### `Name`
+
+```ocaml
+module Name = Header_name
+```
+
+Alias to the `Header_name` module for convenient access to header name types and functions. See the [Header_name documentation](/api/header-name) for details.
+
+## Functions
+
+### `find`
+
+```ocaml
+val find : t list @ local -> Name.t -> t option @ local
+```
+
+Find first header by name. Only matches known headers; use `find_string` for `Other` headers.
+
+<ParamField path="headers" type="t list @ local">
+  List of headers to search
+</ParamField>
+
+<ParamField path="name" type="Name.t">
+  Typed header name to search for (e.g., `Content_type`, `Authorization`)
+</ParamField>
+
+**Returns:** `Some header` if found, `None` if not found
+
+**Example:**
+
+```ocaml
+open Httpz
+
+let get_content_type headers =
+  match Header.find headers Header_name.Content_type with
+  | Some h -> Some (Span.to_string buf h.value)
+  | None -> None
+```
+
+**Note:** This function only matches against the typed `Name.t` enumeration. For custom/unknown headers (those parsed as `Other`), use `find_string` instead.
+
+### `find_string`
+
+```ocaml
+val find_string : Base_bigstring.t -> t list @ local -> string -> t option @ local
+```
+
+Find header by string name (case-insensitive).
+
+<ParamField path="buf" type="Base_bigstring.t">
+  Buffer containing the header data
+</ParamField>
+
+<ParamField path="headers" type="t list @ local">
+  List of headers to search
+</ParamField>
+
+<ParamField path="name" type="string">
+  Header name to search for (case-insensitive)
+</ParamField>
+
+**Returns:** `Some header` if found, `None` if not found
+
+**Example:**
+
+```ocaml
+(* Find a custom header *)
+let get_custom_header buf headers =
+  match Header.find_string buf headers "X-Custom-Header" with
+  | Some h -> Some (Span.to_string buf h.value)
+  | None -> None
+
+(* Case-insensitive matching *)
+let auth = Header.find_string buf headers "authorization" in
+let auth2 = Header.find_string buf headers "Authorization" in
+(* Both will match the same header *)
+```
+
+**Note:** This function performs case-insensitive comparison and works with both known and unknown headers.
+
+### `pp_with_buf`
+
+```ocaml
+val pp_with_buf : Base_bigstring.t -> Stdlib.Format.formatter -> t -> unit
+```
+
+Pretty-print header with buffer (shows actual values).
+
+<ParamField path="buf" type="Base_bigstring.t">
+  Buffer containing the header data
+</ParamField>
+
+<ParamField path="fmt" type="Stdlib.Format.formatter">
+  Formatter to write output to
+</ParamField>
+
+<ParamField path="header" type="t">
+  Header to print
+</ParamField>
+
+**Example:**
+
+```ocaml
+(* Prints: "Content-Type: application/json" *)
+Header.pp_with_buf buf Format.std_formatter header
+```
+
+### `pp`
+
+```ocaml
+val pp : Stdlib.Format.formatter -> t -> unit
+```
+
+Pretty-print header structure (shows field values without resolving spans).
+
+<ParamField path="fmt" type="Stdlib.Format.formatter">
+  Formatter to write output to
+</ParamField>
+
+<ParamField path="header" type="t">
+  Header to print
+</ParamField>
+
+**Example:**
+
+```ocaml
+(* Prints the record structure with span offsets *)
+Header.pp Format.std_formatter header
+(* Output: { name = Content_type; name_span = #{ off = 0; len = 12 }; value = #{ off = 14; len = 16 } } *)
+```
+
+## Usage Examples
+
+### Basic Header Access
+
+```ocaml
+open Httpz
+
+let process_headers buf headers =
+  (* Look up Content-Type *)
+  let content_type = 
+    match Header.find headers Header_name.Content_type with
+    | Some h -> Span.to_string buf h.value
+    | None -> "application/octet-stream" (* default *)
+  in
+  
+  (* Look up Authorization *)
+  let auth_token =
+    match Header.find headers Header_name.Authorization with
+    | Some h -> Some (Span.to_string buf h.value)
+    | None -> None
+  in
+  
+  (content_type, auth_token)
+```
+
+### Working with Custom Headers
+
+```ocaml
+let get_custom_headers buf headers =
+  (* Find custom application headers *)
+  let request_id = Header.find_string buf headers "X-Request-ID" in
+  let correlation_id = Header.find_string buf headers "X-Correlation-ID" in
+  let api_key = Header.find_string buf headers "X-API-Key" in
+  
+  match (request_id, correlation_id, api_key) with
+  | (Some rid, Some cid, Some key) ->
+      { request_id = Span.to_string buf rid.value
+      ; correlation_id = Span.to_string buf cid.value
+      ; api_key = Span.to_string buf key.value
+      }
+  | _ -> failwith "Missing required headers"
+```
+
+### Checking for Specific Headers
+
+```ocaml
+let requires_auth headers =
+  (* Check if Authorization header is present *)
+  match Header.find headers Header_name.Authorization with
+  | Some _ -> true
+  | None -> false
+
+let is_json_content headers =
+  (* Check if Content-Type is JSON *)
+  match Header.find headers Header_name.Content_type with
+  | Some h when Span.equal buf h.value "application/json" -> true
+  | _ -> false
+```
+
+### Iterating Over Headers
+
+```ocaml
+let print_all_headers buf headers =
+  List.iter headers ~f:(fun header ->
+    let name_str = match header.name with
+      | Header_name.Other -> Span.to_string buf header.name_span
+      | known -> Header_name.canonical known
+    in
+    let value_str = Span.to_string buf header.value in
+    Printf.printf "%s: %s\n" name_str value_str
+  )
+```
+
+### Extracting Multiple Values
+
+```ocaml
+let get_accept_headers buf headers =
+  (* Headers can appear multiple times *)
+  List.filter_map headers ~f:(fun h ->
+    match h.name with
+    | Header_name.Accept -> Some (Span.to_string buf h.value)
+    | _ -> None
+  )
+```
+
+### Conditional Processing
+
+```ocaml
+let should_compress buf headers =
+  match Header.find headers Header_name.Accept_encoding with
+  | Some h ->
+      let encoding = Span.to_string buf h.value in
+      String.is_substring encoding ~substring:"gzip" ||
+      String.is_substring encoding ~substring:"deflate"
+  | None -> false
+
+let get_cache_control buf headers =
+  match Header.find headers Header_name.Cache_control with
+  | Some h -> 
+      let value = Span.to_string buf h.value in
+      if String.is_substring value ~substring:"no-cache" then
+        `No_cache
+      else if String.is_substring value ~substring:"no-store" then
+        `No_store
+      else
+        `Default
+  | None -> `Default
+```
+
+### Working with Cookies
+
+```ocaml
+let get_cookies buf headers =
+  match Header.find headers Header_name.Cookie with
+  | Some h ->
+      let cookie_str = Span.to_string buf h.value in
+      (* Parse cookie string *)
+      String.split cookie_str ~on:';'
+      |> List.map ~f:String.strip
+      |> List.filter_map ~f:(fun pair ->
+          match String.lsplit2 pair ~on:'=' with
+          | Some (k, v) -> Some (String.strip k, String.strip v)
+          | None -> None
+        )
+  | None -> []
+```

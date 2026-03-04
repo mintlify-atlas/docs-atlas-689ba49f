@@ -1,0 +1,355 @@
+---
+title: "Header_name"
+description: "HTTP header name enumeration for efficient header processing"
+---
+
+The `Header_name` module provides an enumeration of common HTTP headers for efficient header name comparison and processing. Unknown headers are represented as `Other` with the actual name stored in the header's `name_span` field.
+
+## Type Definition
+
+<ResponseField name="t" type="variant">
+  HTTP header name enumeration.
+
+  <ResponseField name="Cache_control" type="variant">
+    Cache-Control header
+  </ResponseField>
+
+  <ResponseField name="Connection" type="variant">
+    Connection header
+  </ResponseField>
+
+  <ResponseField name="Date" type="variant">
+    Date header
+  </ResponseField>
+
+  <ResponseField name="Transfer_encoding" type="variant">
+    Transfer-Encoding header
+  </ResponseField>
+
+  <ResponseField name="Upgrade" type="variant">
+    Upgrade header
+  </ResponseField>
+
+  <ResponseField name="Via" type="variant">
+    Via header
+  </ResponseField>
+
+  <ResponseField name="Accept" type="variant">
+    Accept header
+  </ResponseField>
+
+  <ResponseField name="Accept_charset" type="variant">
+    Accept-Charset header
+  </ResponseField>
+
+  <ResponseField name="Accept_encoding" type="variant">
+    Accept-Encoding header
+  </ResponseField>
+
+  <ResponseField name="Accept_language" type="variant">
+    Accept-Language header
+  </ResponseField>
+
+  <ResponseField name="Accept_ranges" type="variant">
+    Accept-Ranges header
+  </ResponseField>
+
+  <ResponseField name="Authorization" type="variant">
+    Authorization header
+  </ResponseField>
+
+  <ResponseField name="Cookie" type="variant">
+    Cookie header
+  </ResponseField>
+
+  <ResponseField name="Expect" type="variant">
+    Expect header
+  </ResponseField>
+
+  <ResponseField name="Host" type="variant">
+    Host header
+  </ResponseField>
+
+  <ResponseField name="If_match" type="variant">
+    If-Match header
+  </ResponseField>
+
+  <ResponseField name="If_modified_since" type="variant">
+    If-Modified-Since header
+  </ResponseField>
+
+  <ResponseField name="If_none_match" type="variant">
+    If-None-Match header
+  </ResponseField>
+
+  <ResponseField name="If_range" type="variant">
+    If-Range header
+  </ResponseField>
+
+  <ResponseField name="If_unmodified_since" type="variant">
+    If-Unmodified-Since header
+  </ResponseField>
+
+  <ResponseField name="Range" type="variant">
+    Range header
+  </ResponseField>
+
+  <ResponseField name="Referer" type="variant">
+    Referer header
+  </ResponseField>
+
+  <ResponseField name="User_agent" type="variant">
+    User-Agent header
+  </ResponseField>
+
+  <ResponseField name="Age" type="variant">
+    Age header
+  </ResponseField>
+
+  <ResponseField name="Etag" type="variant">
+    ETag header
+  </ResponseField>
+
+  <ResponseField name="Location" type="variant">
+    Location header
+  </ResponseField>
+
+  <ResponseField name="Retry_after" type="variant">
+    Retry-After header
+  </ResponseField>
+
+  <ResponseField name="Server" type="variant">
+    Server header
+  </ResponseField>
+
+  <ResponseField name="Set_cookie" type="variant">
+    Set-Cookie header
+  </ResponseField>
+
+  <ResponseField name="Www_authenticate" type="variant">
+    WWW-Authenticate header
+  </ResponseField>
+
+  <ResponseField name="Allow" type="variant">
+    Allow header
+  </ResponseField>
+
+  <ResponseField name="Content_disposition" type="variant">
+    Content-Disposition header
+  </ResponseField>
+
+  <ResponseField name="Content_encoding" type="variant">
+    Content-Encoding header
+  </ResponseField>
+
+  <ResponseField name="Content_language" type="variant">
+    Content-Language header
+  </ResponseField>
+
+  <ResponseField name="Content_length" type="variant">
+    Content-Length header
+  </ResponseField>
+
+  <ResponseField name="Content_location" type="variant">
+    Content-Location header
+  </ResponseField>
+
+  <ResponseField name="Content_range" type="variant">
+    Content-Range header
+  </ResponseField>
+
+  <ResponseField name="Content_type" type="variant">
+    Content-Type header
+  </ResponseField>
+
+  <ResponseField name="Expires" type="variant">
+    Expires header
+  </ResponseField>
+
+  <ResponseField name="Last_modified" type="variant">
+    Last-Modified header
+  </ResponseField>
+
+  <ResponseField name="X_forwarded_for" type="variant">
+    X-Forwarded-For header
+  </ResponseField>
+
+  <ResponseField name="X_forwarded_proto" type="variant">
+    X-Forwarded-Proto header
+  </ResponseField>
+
+  <ResponseField name="X_forwarded_host" type="variant">
+    X-Forwarded-Host header
+  </ResponseField>
+
+  <ResponseField name="X_request_id" type="variant">
+    X-Request-Id header
+  </ResponseField>
+
+  <ResponseField name="X_correlation_id" type="variant">
+    X-Correlation-Id header
+  </ResponseField>
+
+  <ResponseField name="Other" type="variant">
+    Unknown header; the actual name is stored in the header's `name_span` field
+  </ResponseField>
+</ResponseField>
+
+## Parsing
+
+### `of_span`
+
+```ocaml
+val of_span : local_ Base_bigstring.t -> Span.t -> t
+```
+
+Parse header name from span. Returns a known header variant if recognized, otherwise `Other`.
+
+<ParamField path="buf" type="local_ Base_bigstring.t" required>
+  The buffer containing the header name
+</ParamField>
+
+<ParamField path="span" type="Span.t" required>
+  The span representing the header name in the buffer
+</ParamField>
+
+**Example:**
+
+```ocaml
+let name = Header_name.of_span buffer header.name_span in
+match name with
+| Content_type -> (* Handle Content-Type *)
+  ...
+| Host -> (* Handle Host *)
+  ...
+| Other -> (* Handle unknown header *)
+  let name_str = Span.to_string buffer header.name_span in
+  ...
+```
+
+## Conversion Functions
+
+### `canonical`
+
+```ocaml
+val canonical : t -> string
+```
+
+Canonical display name for known headers. Returns `"(unknown)"` for `Other`.
+
+Use this for response writing when you don't need buffer access.
+
+<ParamField path="header_name" type="t" required>
+  The header name to convert
+</ParamField>
+
+**Example:**
+
+```ocaml
+let display_name = Header_name.canonical Content_type in
+(* Returns: "Content-Type" *)
+
+let unknown = Header_name.canonical Other in
+(* Returns: "(unknown)" *)
+```
+
+### `to_string`
+
+```ocaml
+val to_string : local_ Base_bigstring.t -> t -> string
+```
+
+<Warning>
+  **Deprecated:** Use `canonical` instead - the buffer parameter is unused.
+</Warning>
+
+Canonical display name for headers. Returns `"(unknown)"` for `Other`.
+
+<ParamField path="buf" type="local_ Base_bigstring.t" required>
+  Buffer parameter (unused)
+</ParamField>
+
+<ParamField path="header_name" type="t" required>
+  The header name to convert
+</ParamField>
+
+### `lowercase`
+
+```ocaml
+val lowercase : t -> string
+```
+
+Lowercase canonical name for known headers. Returns `""` for `Other`.
+
+<ParamField path="header_name" type="t" required>
+  The header name to convert
+</ParamField>
+
+**Example:**
+
+```ocaml
+let lower = Header_name.lowercase Content_type in
+(* Returns: "content-type" *)
+
+let unknown = Header_name.lowercase Other in
+(* Returns: "" *)
+```
+
+## Pretty Printing
+
+### `pp`
+
+```ocaml
+val pp : Stdlib.Format.formatter -> t -> unit
+```
+
+Pretty-print header name.
+
+<ParamField path="formatter" type="Stdlib.Format.formatter" required>
+  The formatter to print to
+</ParamField>
+
+<ParamField path="header_name" type="t" required>
+  The header name to print
+</ParamField>
+
+**Example:**
+
+```ocaml
+Format.printf "Header: %a@." Header_name.pp Content_type
+(* Output: Header: Content-Type *)
+```
+
+## Usage Examples
+
+### Processing Headers by Type
+
+```ocaml
+let process_header buffer header =
+  let name = Header_name.of_span buffer header.name_span in
+  match name with
+  | Content_length ->
+    let length = Span.parse_int64 buffer header.value_span in
+    (* Handle content length *)
+    ...
+  | Content_type ->
+    let mime = Span.to_string buffer header.value_span in
+    (* Handle content type *)
+    ...
+  | Host ->
+    (* Handle host header *)
+    ...
+  | Other ->
+    (* Handle custom headers *)
+    let name = Span.to_string buffer header.name_span in
+    let value = Span.to_string buffer header.value_span in
+    ...
+```
+
+### Writing Response Headers
+
+```ocaml
+let write_header name value =
+  let canonical_name = Header_name.canonical name in
+  Printf.sprintf "%s: %s\r\n" canonical_name value
+```

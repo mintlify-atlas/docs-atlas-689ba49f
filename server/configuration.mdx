@@ -1,0 +1,279 @@
+---
+title: Server Configuration
+description: Command-line options and configuration for the httpz static file server
+---
+
+## Quick Start
+
+The httpz static file server is available as `bin/httpz_server.exe` and can be run with sensible defaults:
+
+```bash
+# Serve current directory on default port 8080
+dune exec bin/httpz_server.exe
+```
+
+<Tip>
+The server will display startup information including the directory being served and supported features.
+</Tip>
+
+## Command-Line Options
+
+The server accepts two optional flags for configuration:
+
+### Port Configuration
+
+Specify the TCP port to listen on using the `-p` flag:
+
+```bash
+# Listen on port 3000
+dune exec bin/httpz_server.exe -- -p 3000
+```
+
+<ParamField path="-p" type="int" default="8080">
+  Port number to listen on for HTTP connections. Must be a valid TCP port (1-65535).
+</ParamField>
+
+### Directory Configuration
+
+Specify the directory to serve using the `-d` flag:
+
+```bash
+# Serve /var/www directory
+dune exec bin/httpz_server.exe -- -d /var/www
+```
+
+<ParamField path="-d" type="string" default=".">
+  Directory path to serve files from. Can be absolute or relative to the current working directory.
+</ParamField>
+
+## Usage Examples
+
+<CodeGroup>
+
+```bash Default (current directory, port 8080)
+dune exec bin/httpz_server.exe
+```
+
+```bash Custom Port
+# Serve on port 3000
+dune exec bin/httpz_server.exe -- -p 3000
+```
+
+```bash Custom Directory
+# Serve /var/www
+dune exec bin/httpz_server.exe -- -d /var/www
+```
+
+```bash Both Options
+# Serve /var/www on port 3000
+dune exec bin/httpz_server.exe -- -d /var/www -p 3000
+```
+
+```bash Help
+# Display all available options
+dune exec bin/httpz_server.exe -- -help
+```
+
+</CodeGroup>
+
+## Server Output
+
+When the server starts, it displays configuration information:
+
+```
+httpz serving /var/www on http://localhost:3000/
+  Supports: Range requests, ETag, If-None-Match
+```
+
+<Info>
+The server logs the directory being served and the URL to access it, along with supported HTTP features.
+</Info>
+
+## Implementation Details
+
+The command-line interface is built using OCaml's `Command` library:
+
+```ocaml
+let command =
+  Command.async
+    ~summary:"Static file server using httpz with Range, ETag, and conditional request support"
+    (Command.Param.map2
+       (Command.Param.flag
+          "-p"
+          (Command.Param.optional_with_default 8080 Command.Param.int)
+          ~doc:"PORT Port to listen on (default: 8080)")
+       (Command.Param.flag
+          "-d"
+          (Command.Param.optional_with_default "." Command.Param.string)
+          ~doc:"DIR Directory to serve (default: .)")
+       ~f:(fun port root () -> run ~port ~root ()))
+```
+
+## Server Limits
+
+The server has the following built-in limits for security and performance:
+
+<ResponseField name="max_connections" type="int" default="10000">
+  Maximum number of concurrent client connections
+</ResponseField>
+
+<ResponseField name="backlog" type="int" default="128">
+  TCP listen backlog for pending connections
+</ResponseField>
+
+<ResponseField name="response_buffer_size" type="int" default="65536">
+  Size of the response header buffer in bytes (64KB)
+</ResponseField>
+
+<ResponseField name="request_buffer_size" type="int" default="32768">
+  Size of the request buffer in bytes (32KB, from `Httpz.buffer_size`)
+</ResponseField>
+
+### HTTP Parser Limits
+
+The server uses default httpz parser limits:
+
+```ocaml
+let server_limits = Httpz.default_limits
+```
+
+These limits control:
+- Maximum header count
+- Maximum header size
+- Maximum request line length
+- Content-length overflow detection
+
+<Note>
+Parser limits help prevent denial-of-service attacks and ensure efficient memory usage.
+</Note>
+
+## Connection Management
+
+The server creates a TCP listener with these characteristics:
+
+```ocaml
+let run ~port ~root () =
+  let where_to_listen = Tcp.Where_to_listen.of_port port in
+  printf "httpz serving %s on http://localhost:%d/\n%!" root port;
+  printf "  Supports: Range requests, ETag, If-None-Match\n%!";
+  let%bind _server =
+    Tcp.Server.create
+      ~on_handler_error:`Raise
+      ~backlog:128
+      ~max_connections:10000
+      where_to_listen
+      (fun addr reader writer -> handle_client ~root addr reader writer)
+  in
+  Deferred.never ()
+```
+
+### Error Handling
+
+Connection errors are caught and logged with the client address:
+
+```ocaml
+let handle_client ~root addr reader writer =
+  let conn = create_conn reader writer in
+  let%map result = Monitor.try_with (fun () -> handle_connection conn ~root) in
+  match result with
+  | Ok () -> ()
+  | Error exn ->
+    let addr_str =
+      match addr with
+      | `Inet (host, port) -> sprintf "%s:%d" (Unix.Inet_addr.to_string host) port
+      | `Unix path -> path
+    in
+    printf "[%s] Error: %s\n%!" addr_str (Exn.to_string exn)
+```
+
+<Warning>
+The server is configured with `~on_handler_error:`Raise` to ensure errors are visible during development. For production use, consider logging errors instead.
+</Warning>
+
+## Network Configuration
+
+### Listening Address
+
+The server binds to all interfaces on the specified port:
+
+```ocaml
+let where_to_listen = Tcp.Where_to_listen.of_port port
+```
+
+This allows connections from:
+- `localhost` / `127.0.0.1`
+- Local network interfaces
+- External interfaces (if firewall permits)
+
+<Tip>
+To restrict access to localhost only, modify the code to use `Tcp.Where_to_listen.of_port_on_address port "127.0.0.1"`
+</Tip>
+
+## Environment Requirements
+
+<Steps>
+  <Step title="OxCaml Compiler">
+    Requires the OxCaml compiler from [oxcaml.org](https://oxcaml.org/) for unboxed type support
+  </Step>
+  
+  <Step title="OCaml Dependencies">
+    The following OCaml libraries must be installed:
+    - `core` - Base functionality
+    - `async` - Asynchronous I/O
+    - `core_unix` - Unix system calls
+  </Step>
+  
+  <Step title="Build System">
+    Use Dune to build the server:
+    ```bash
+    dune build bin/httpz_server.exe
+    ```
+  </Step>
+</Steps>
+
+## Production Deployment
+
+For production use, consider:
+
+<AccordionGroup>
+  <Accordion title="Reverse Proxy">
+    Run httpz behind nginx or another reverse proxy for:
+    - TLS/SSL termination
+    - Load balancing
+    - Additional caching layers
+    - Access logging
+  </Accordion>
+  
+  <Accordion title="Process Management">
+    Use a process supervisor like:
+    - systemd (Linux)
+    - supervisord
+    - Docker containers
+  </Accordion>
+  
+  <Accordion title="File Permissions">
+    Ensure the server process has:
+    - Read access to served directories
+    - No write access (defense in depth)
+    - Minimal privileges (non-root user)
+  </Accordion>
+  
+  <Accordion title="Monitoring">
+    Consider adding:
+    - Connection count metrics
+    - Request latency tracking
+    - Error rate monitoring
+    - Health check endpoints
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Server Overview" icon="server" href="/server/overview">
+    Learn about server features and capabilities
+  </Card>
+  <Card title="Performance" icon="gauge-high" href="/concepts/architecture">
+    Understand httpz performance characteristics
+  </Card>
+</CardGroup>

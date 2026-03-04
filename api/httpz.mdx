@@ -1,0 +1,290 @@
+---
+title: Httpz
+description: Main module for zero-allocation HTTP/1.1 parsing
+---
+
+The main `Httpz` module provides a stack-allocated HTTP/1.1 request parser for OCaml with zero heap allocation during parsing. Parses requests from a 32KB bigarray buffer, returning results entirely on the caller's stack.
+
+## Security Features
+
+This parser implements RFC 7230 security checks:
+
+- **Content-Length overflow protection** with configurable limits
+- **Bare CR detection** (HTTP request smuggling prevention)
+- **Ambiguous framing detection** (both Content-Length and Transfer-Encoding)
+- **Host header requirement** for HTTP/1.1
+
+## Constants
+
+### buffer_size
+
+```ocaml
+val buffer_size : int
+```
+
+Maximum buffer size: 32KB (32768 bytes).
+
+### max_headers
+
+```ocaml
+val max_headers : int16#
+```
+
+Maximum headers per request.
+
+### default_limits
+
+```ocaml
+val default_limits : Buf_read.limits
+```
+
+Default security limits:
+- **max_content_length**: 100MB
+- **max_header_size**: 16KB
+- **max_header_count**: 100 headers
+- **max_chunk_size**: 16MB
+
+## Buffer Management
+
+### create_buffer
+
+```ocaml
+val create_buffer : unit -> buffer
+```
+
+Create a new 32KB bigarray buffer for HTTP parsing.
+
+<ParamField path="unit" type="unit">
+  Unit parameter
+</ParamField>
+
+<ResponseField name="buffer" type="Base_bigstring.t">
+  A 32KB bigarray buffer ready for HTTP parsing
+</ResponseField>
+
+**Example:**
+```ocaml
+let buf = Httpz.create_buffer () in
+let len = read_from_socket buf in
+(* Now parse the request *)
+```
+
+## Parsing
+
+### parse
+
+```ocaml
+val parse : 
+  buffer -> 
+  len:int16# -> 
+  limits:limits -> 
+  #(Buf_read.status * Req.t * Header.t list) @ local
+```
+
+Parse HTTP/1.1 request with security limits. Returns an unboxed tuple containing:
+- Parse status (Complete, Partial, or error)
+- Request record with cached content headers
+- List of remaining headers (stack-allocated)
+
+<ParamField path="buffer" type="buffer">
+  The bigarray buffer containing HTTP request data
+</ParamField>
+
+<ParamField path="len" type="int16#">
+  Number of bytes read into the buffer
+</ParamField>
+
+<ParamField path="limits" type="limits">
+  Security limits for parsing (use `default_limits` or custom)
+</ParamField>
+
+<ResponseField name="status" type="Buf_read.status">
+  Parse result status:
+  - `Complete` - Successfully parsed
+  - `Partial` - Need more data
+  - `Invalid_method` - Invalid HTTP method
+  - `Invalid_target` - Invalid request target
+  - `Invalid_version` - Invalid HTTP version
+  - `Invalid_header` - Malformed header
+  - `Headers_too_large` - Headers exceed size limit
+  - `Malformed` - General parsing error
+  - `Content_length_overflow` - Content-Length too large
+  - `Ambiguous_framing` - Both Content-Length and Transfer-Encoding
+  - `Bare_cr_detected` - CR without LF (security violation)
+  - `Missing_host_header` - HTTP/1.1 requires Host header
+  - `Unsupported_transfer_encoding` - Transfer-Encoding other than chunked/identity
+</ResponseField>
+
+<ResponseField name="req" type="Req.t">
+  Parsed request record containing:
+  - `meth` - HTTP method
+  - `target` - Request target (as span)
+  - `version` - HTTP version
+  - `body_off` - Offset where body begins
+  - `content_length` - Content-Length value (-1 if not present)
+  - `is_chunked` - true if Transfer-Encoding: chunked
+  - `keep_alive` - true for persistent connections
+  - `expect_continue` - true if Expect: 100-continue
+</ResponseField>
+
+<ResponseField name="headers" type="Header.t list">
+  List of headers (excluding cached content headers). Each header contains:
+  - `name` - Parsed header name enum
+  - `name_span` - Span for unknown headers
+  - `value` - Header value as span into buffer
+</ResponseField>
+
+**Example:**
+```ocaml
+let buf = Httpz.create_buffer () in
+let len = read_from_socket buf in
+let #(status, req, headers) = 
+  Httpz.parse buf ~len ~limits:Httpz.default_limits in
+
+match status with
+| Buf_read.Complete ->
+  (* Content headers are cached in the request struct *)
+  let content_len = req.#content_length in
+  let is_chunked = req.#is_chunked in
+  let keep_alive = req.#keep_alive in
+  
+  (* Access request line fields *)
+  let target_str = Span.to_string buf req.#target in
+  
+  (* Iterate through other headers *)
+  List.iter (fun hdr ->
+    match hdr.Header.name with
+    | Header.Name.Host ->
+      let host = Span.to_string buf hdr.Header.value in
+      (* ... *)
+    | Header.Name.Other ->
+      if Span.equal_caseless buf hdr.Header.name_span "x-custom" then
+        (* Handle custom header *)
+    | _ -> ()
+  ) headers
+  
+| Buf_read.Partial -> 
+  need_more_data ()
+  
+| Buf_read.Headers_too_large -> 
+  send_413 ()
+  
+| Buf_read.Content_length_overflow -> 
+  send_413 ()
+  
+| Buf_read.Bare_cr_detected -> 
+  send_400 () (* security violation *)
+  
+| Buf_read.Ambiguous_framing -> 
+  send_400 () (* security violation *)
+  
+| Buf_read.Missing_host_header -> 
+  send_400 ()
+  
+| _ -> 
+  send_400 ()
+```
+
+## Type Aliases
+
+The main module exports these type aliases for convenience:
+
+```ocaml
+type buffer = Base_bigstring.t
+type span = Span.t
+type method_ = Method.t
+type version = Version.t
+type header_name = Header_name.t
+type header = Header.t
+type status = Buf_read.status
+type limits = Buf_read.limits
+type req = Req.t
+type chunk_status = Chunk.status
+type trailer_status = Chunk.trailer_status
+type chunk = Chunk.t
+type res_status = Res.status
+```
+
+## Submodules
+
+The `Httpz` module re-exports all submodules:
+
+- **Buf_read** - Buffer reading utilities and status types
+- **Buf_write** - Buffer writing utilities for responses
+- **Parser** - Parser combinators for HTTP parsing
+- **Span** - Unboxed span operations for buffer slices
+- **Method** - HTTP method enumeration
+- **Version** - HTTP version enumeration
+- **Header_name** - HTTP header name enumeration
+- **Header** - HTTP header type and operations
+- **Req** - HTTP request type
+- **Res** - HTTP response utilities
+- **Chunk** - Chunked transfer encoding parser
+- **Etag** - ETag parsing and comparison
+- **Date** - HTTP date formatting
+- **Range** - Range request parsing and handling
+- **Err** - Error types and handling
+
+## Performance Characteristics
+
+- **Zero heap allocation** during parsing
+- **Stack-allocated results** using unboxed types and local mode
+- **Single-pass parsing** with explicit position threading
+- **32KB buffer limit** ensures bounded memory usage
+- **Unboxed arithmetic** using `int16#` and `int64#` for performance
+
+## Security Best Practices
+
+1. **Always check status** - Handle all error cases, especially security-related ones
+2. **Use default_limits** - Or configure stricter limits for your use case
+3. **Reject smuggling attempts** - `Bare_cr_detected` and `Ambiguous_framing` indicate attacks
+4. **Enforce Host header** - Required for HTTP/1.1 compliance
+5. **Validate Content-Length** - Parser automatically checks against `max_content_length`
+
+## Full Example
+
+```ocaml
+open Core
+open Async
+
+let handle_connection reader writer =
+  let buf = Httpz.create_buffer () in
+  let rec loop read_len =
+    let len16 = Httpz.Buf_read.i16 read_len in
+    let #(status, req, headers) = 
+      Httpz.parse buf ~len:len16 ~limits:Httpz.default_limits 
+    in
+    match status with
+    | Httpz.Buf_read.Complete ->
+      (* Extract request data *)
+      let target = Httpz.Span.to_string buf req.#target in
+      let meth = req.#meth in
+      
+      (* Handle request *)
+      handle_request ~buf ~req ~headers >>= fun response ->
+      Writer.write writer response;
+      Writer.flushed writer
+      
+    | Httpz.Buf_read.Partial ->
+      (* Read more data *)
+      if read_len >= Httpz.buffer_size then
+        send_error writer "Request too large"
+      else
+        let bss = Bigsubstring.create buf 
+          ~pos:read_len 
+          ~len:(Httpz.buffer_size - read_len) 
+        in
+        Reader.read_bigsubstring reader bss >>= function
+        | `Eof -> return ()
+        | `Ok n -> loop (read_len + n)
+        
+    | _ ->
+      (* Handle error *)
+      send_error writer "Bad request"
+  in
+  Reader.read_bigsubstring reader 
+    (Bigsubstring.create buf ~pos:0 ~len:Httpz.buffer_size) 
+  >>= function
+  | `Eof -> return ()
+  | `Ok n -> loop n
+```

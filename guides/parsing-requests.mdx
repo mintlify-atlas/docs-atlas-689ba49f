@@ -1,0 +1,340 @@
+---
+title: Parsing HTTP Requests
+description: Learn how to parse HTTP/1.1 requests using httpz's zero-allocation parser
+---
+
+## Overview
+
+Httpz provides a stack-allocated HTTP/1.1 request parser that operates on a 32KB bigarray buffer with zero heap allocations during parsing. The parser is RFC 7230 compliant and includes built-in security features.
+
+## Basic Request Parsing
+
+<Steps>
+  <Step title="Create a buffer">
+    First, create a 32KB parsing buffer:
+
+    ```ocaml
+    let buf = Httpz.create_buffer ()
+    ```
+
+    The buffer is a `Base_bigstring.t` (bigarray) that can be reused across multiple requests.
+  </Step>
+
+  <Step title="Read data into buffer">
+    Read data from your socket or input source into the buffer:
+
+    ```ocaml
+    (* Read from socket into buffer *)
+    let len = read_from_socket buf in
+    let len16 = Httpz.Buf_read.i16 len
+    ```
+
+    <Note>
+      The parser uses `int16#` (unboxed 16-bit integers) for offsets since the maximum buffer size is 32KB.
+    </Note>
+  </Step>
+
+  <Step title="Parse the request">
+    Call `Httpz.parse` with the buffer, length, and security limits:
+
+    ```ocaml
+    let #(status, req, headers) = 
+      Httpz.parse buf ~len:len16 ~limits:Httpz.default_limits
+    ```
+
+    The parser returns an unboxed tuple containing:
+    - `status`: Parse result status
+    - `req`: Parsed request structure (stack-allocated)
+    - `headers`: List of headers (stack-allocated)
+  </Step>
+</Steps>
+
+## Handling Parse Status
+
+The parser returns a `Buf_read.status` value indicating the result:
+
+<CodeGroup>
+```ocaml Complete Request
+match status with
+| Buf_read.Complete ->
+  (* Request fully parsed and valid *)
+  let method_ = req.#meth in
+  let target = req.#target in
+  let version = req.#version in
+  (* Process the request... *)
+```
+
+```ocaml Partial Request
+| Buf_read.Partial ->
+  (* Need more data - read more bytes into buffer *)
+  read_more_data_into_buffer ()
+```
+
+```ocaml Security Violations
+| Buf_read.Bare_cr_detected ->
+  (* HTTP smuggling attempt - send 400 Bad Request *)
+  send_400 "Bad Request"
+
+| Buf_read.Ambiguous_framing ->
+  (* Both Content-Length and Transfer-Encoding present *)
+  send_400 "Bad Request"
+```
+
+```ocaml Client Errors
+| Buf_read.Headers_too_large ->
+  (* Headers exceed size limit *)
+  send_413 "Payload Too Large"
+
+| Buf_read.Content_length_overflow ->
+  (* Content-Length value too large *)
+  send_413 "Payload Too Large"
+
+| Buf_read.Missing_host_header ->
+  (* HTTP/1.1 requires Host header *)
+  send_400 "Bad Request"
+```
+</CodeGroup>
+
+## Accessing Request Data
+
+The `Req.t` type contains parsed request information:
+
+```ocaml
+type t =
+  #{ meth : Method.t
+   ; target : Span.t
+   ; version : Version.t
+   ; body_off : int16#
+   ; content_length : int64#
+   ; is_chunked : bool
+   ; keep_alive : bool
+   ; expect_continue : bool
+   }
+```
+
+### Extracting Request Line
+
+```ocaml
+(* Method *)
+let method_ = req.#meth in
+match method_ with
+| Method.Get -> (* Handle GET *)
+| Method.Post -> (* Handle POST *)
+| Method.Put -> (* Handle PUT *)
+| Method.Delete -> (* Handle DELETE *)
+| _ -> (* Other methods *)
+
+(* Target (request URI) *)
+let target_str = Span.to_string buf req.#target in
+
+(* HTTP Version *)
+let version = req.#version in
+match version with
+| Version.Http_1_0 -> (* HTTP/1.0 *)
+| Version.Http_1_1 -> (* HTTP/1.1 *)
+```
+
+### Content Headers
+
+Content-related headers are cached in the request structure for efficient access:
+
+```ocaml
+(* Content-Length (or -1L if not present) *)
+let content_len = req.#content_length in
+if Int64_u.compare content_len (Int64_u.of_int64 (-1L)) <> 0 then
+  (* Content-Length is present *)
+  let len = Int64_u.to_int64 content_len in
+  (* ... *)
+
+(* Transfer-Encoding: chunked *)
+if req.#is_chunked then
+  (* Use Chunk.parse for body *)
+  parse_chunked_body buf req
+else
+  (* Fixed-length body *)
+  read_body_content buf req
+
+(* Connection: keep-alive *)
+if req.#keep_alive then
+  (* Keep connection open for next request *)
+  handle_persistent_connection ()
+else
+  (* Close after response *)
+  close_after_response ()
+
+(* Expect: 100-continue *)
+if req.#expect_continue then
+  (* Send 100 Continue before reading body *)
+  send_100_continue ()
+```
+
+## Accessing Headers
+
+Headers are returned as a stack-allocated list. Content headers (Content-Length, Transfer-Encoding, Connection, Expect) are excluded from this list as they're cached in the request structure.
+
+### Finding Known Headers
+
+```ocaml
+(* Find by known header name *)
+let host_hdr = Header.find headers Header_name.Host in
+match host_hdr with
+| Some hdr ->
+  let host = Span.to_string buf hdr.value in
+  (* Use host value *)
+| None ->
+  (* Host header not present *)
+```
+
+### Finding Custom Headers
+
+```ocaml
+(* Find by string name (case-insensitive) *)
+let auth_hdr = Header.find_string buf headers "Authorization" in
+match auth_hdr with
+| Some hdr ->
+  let auth = Span.to_string buf hdr.value in
+  (* Parse authorization *)
+| None -> ()
+```
+
+### Iterating All Headers
+
+```ocaml
+List.iter (fun hdr ->
+  match hdr.Header.name with
+  | Header_name.Host ->
+    let host = Span.to_string buf hdr.value in
+    (* ... *)
+  | Header_name.User_agent ->
+    let ua = Span.to_string buf hdr.value in
+    (* ... *)
+  | Header_name.Other ->
+    (* Custom header - use name_span for comparison *)
+    if Span.equal_caseless buf hdr.name_span "x-custom-header" then
+      let value = Span.to_string buf hdr.value in
+      (* ... *)
+  | _ -> ()
+) headers
+```
+
+<Note>
+  Headers and request data reference the buffer via `Span.t` (offset + length). Extract strings only when needed to minimize allocations.
+</Note>
+
+## Accessing Request Body
+
+Check if the complete body is available in the buffer:
+
+```ocaml
+(* Check if body is fully in buffer *)
+if Req.body_in_buffer ~len:len16 req then (
+  (* Get body span *)
+  let body_span = Req.body_span ~len:len16 req in
+  if Span.len body_span > 0 then (
+    (* Extract body content *)
+    let body_str = Span.to_string buf body_span in
+    (* Process body... *)
+  )
+) else (
+  (* Need to read more data *)
+  let needed = Req.body_bytes_needed ~len:len16 req in
+  read_more_bytes needed
+)
+```
+
+<Warning>
+  For chunked transfer encoding (`req.#is_chunked = true`), use the `Chunk` module to parse the body instead of `Req.body_span`.
+</Warning>
+
+## Security Limits
+
+Configure security limits to protect against attacks:
+
+```ocaml
+let custom_limits =
+  #{ Buf_read.max_content_length = Int64_u.of_int64 50_000_000L  (* 50MB *)
+   ; max_header_size = Buf_read.i16 8192                         (* 8KB *)
+   ; max_header_count = Buf_read.i16 50                          (* 50 headers *)
+   ; max_chunk_size = 8_388_608                                  (* 8MB *)
+   }
+
+let #(status, req, headers) = 
+  Httpz.parse buf ~len:len16 ~limits:custom_limits
+```
+
+### Default Limits
+
+```ocaml
+Httpz.default_limits =
+  #{ max_content_length = 100MB
+   ; max_header_size = 16KB
+   ; max_header_count = 100
+   ; max_chunk_size = 16MB
+   }
+```
+
+## Complete Example
+
+```ocaml
+open Httpz
+
+let handle_request socket =
+  (* Create reusable buffer *)
+  let buf = create_buffer () in
+  
+  (* Read from socket *)
+  let len = Unix.read socket buf 0 buffer_size in
+  let len16 = Buf_read.i16 len in
+  
+  (* Parse request *)
+  let #(status, req, headers) = parse buf ~len:len16 ~limits:default_limits in
+  
+  match status with
+  | Buf_read.Complete ->
+    (* Extract request data *)
+    let method_ = req.#meth in
+    let target = Span.to_string buf req.#target in
+    let content_len = req.#content_length in
+    
+    (* Find headers *)
+    let host = 
+      match Header.find headers Header_name.Host with
+      | Some hdr -> Span.to_string buf hdr.value
+      | None -> "unknown"
+    in
+    
+    (* Handle request... *)
+    Printf.printf "Method: %s, Target: %s, Host: %s\n"
+      (Method.to_string method_) target host;
+    
+    (* Check for body *)
+    if req.#is_chunked then
+      handle_chunked_body buf req
+    else if Int64_u.compare content_len (Int64_u.of_int64 0L) > 0 then
+      handle_fixed_body buf req ~len:len16
+    else
+      (* No body *)
+      ()
+  
+  | Buf_read.Partial ->
+    (* Need more data *)
+    read_more_and_retry socket buf
+  
+  | Buf_read.Bare_cr_detected
+  | Buf_read.Ambiguous_framing ->
+    (* Security violation *)
+    send_400_response socket
+  
+  | Buf_read.Headers_too_large
+  | Buf_read.Content_length_overflow ->
+    send_413_response socket
+  
+  | _ ->
+    send_400_response socket
+```
+
+## See Also
+
+- [Writing Responses](/guides/writing-responses) - Send HTTP responses
+- [Chunked Encoding](/guides/chunked-encoding) - Parse chunked request bodies
+- [Security](/guides/security) - RFC 7230 security features

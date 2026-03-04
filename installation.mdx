@@ -1,0 +1,244 @@
+---
+title: Installation
+description: Install httpz and set up the OxCaml compiler
+---
+
+# Installation
+
+httpz requires the OxCaml compiler, which extends OCaml 5.2+ with unboxed types. This guide walks you through installing OxCaml and setting up httpz in your project.
+
+## Prerequisites
+
+<Warning>
+httpz **requires OxCaml**, a modified OCaml compiler with unboxed type support. Standard OCaml will not compile this library.
+</Warning>
+
+Before installing httpz, you need:
+
+- **OCaml 5.2 or later** (as the base for OxCaml)
+- **opam 2.0+** (OCaml package manager)
+- **dune 3.20+** (build system)
+
+## Step 1: Install OxCaml
+
+OxCaml is a modified OCaml compiler that adds support for unboxed types.
+
+### Get OxCaml
+
+Visit the official OxCaml website to download and install the compiler:
+
+```bash
+# Visit https://oxcaml.org/ for installation instructions
+```
+
+<Info>
+OxCaml provides unboxed primitives (`int16#`, `int64#`, `char#`), unboxed records (`#{...}`), and local allocations (`@ local`) that are essential for httpz's zero-allocation design.
+</Info>
+
+### Verify Installation
+
+After installing OxCaml, verify it's working:
+
+```bash
+ocaml --version
+# Should show OCaml 5.2 or later with OxCaml extensions
+```
+
+## Step 2: Install httpz via opam
+
+<Note>
+As of this writing, httpz may not be in the main opam repository. Check the [GitHub repository](https://github.com/avsm/httpz) for the latest installation method.
+</Note>
+
+### From opam (when available)
+
+```bash
+opam install httpz
+```
+
+### From Source
+
+To install from source:
+
+```bash
+# Clone the repository
+git clone https://github.com/avsm/httpz.git
+cd httpz
+
+# Install dependencies
+opam install . --deps-only
+
+# Build and install
+dune build
+dune install
+```
+
+## Step 3: Add to Your Project
+
+Once httpz is installed, add it to your dune project.
+
+### Update dune File
+
+Add `httpz` to your library or executable dependencies:
+
+```lisp
+; For a library
+(library
+  (name mylib)
+  (libraries httpz base base_bigstring))
+
+; For an executable
+(executable
+  (name myserver)
+  (libraries httpz async async_unix base base_bigstring))
+```
+
+### Update dune-project
+
+Ensure your `dune-project` specifies the minimum dune version:
+
+```lisp
+(lang dune 3.20)
+```
+
+Add httpz as a dependency in your package definition:
+
+```lisp
+(package
+  (name your-package)
+  (depends
+    (ocaml (>= 5.2))
+    httpz
+    base
+    base_bigstring))
+```
+
+## Dependencies
+
+httpz has the following runtime dependencies:
+
+### Required Dependencies
+
+- **ocaml** (>= 5.2) - Base OCaml/OxCaml compiler
+- **base** - Jane Street's standard library replacement
+- **base_bigstring** - Bigarray-based strings for zero-copy I/O
+- **dune** (>= 3.20) - Build system
+
+### Optional Dependencies (for server/examples)
+
+- **core** (>= v0.17) - Extended standard library
+- **core_unix** (>= v0.17) - Unix system calls
+- **async** (>= v0.17) - Asynchronous programming library
+- **async_unix** (>= v0.17) - Async Unix I/O
+
+### Test Dependencies
+
+- **core_bench** - Benchmarking framework
+- **eio** - Effects-based I/O library (for comparison benchmarks)
+- **eio_main** - Eio main event loop
+- **ppx_jane** - PPX rewriters
+
+## Configuration
+
+### OxCaml Compiler Requirements
+
+httpz uses OxCaml-specific features:
+
+- **Unboxed integers**: `int16#`, `int64#`, `char#`
+- **Unboxed records**: `#{ field : type }` syntax
+- **Local allocations**: `@ local` annotation
+- **Exclave functions**: `exclave_` keyword for stack discipline
+
+These features are not available in standard OCaml.
+
+### Build Configuration
+
+If you're building a project with httpz, your `.ocamlformat` should be compatible:
+
+```ocamlformat
+version = 0.26.0
+profile = default
+```
+
+## Verify Installation
+
+Create a simple test file to verify httpz is working:
+
+```ocaml test_httpz.ml
+open Base
+
+let () =
+  let buf = Httpz.create_buffer () in
+  Stdio.print_endline "httpz buffer created successfully!"
+  (* Buffer is 32KB *)
+```
+
+Compile and run:
+
+```bash
+dune exec ./test_httpz.exe
+# Output: httpz buffer created successfully!
+```
+
+## Running the Static File Server
+
+Once installed, you can try the included static file server:
+
+```bash
+# Serve current directory on port 8080
+dune exec bin/httpz_server.exe
+
+# Serve specific directory on custom port
+dune exec bin/httpz_server.exe -- -d /var/www -p 3000
+
+# Get help
+dune exec bin/httpz_server.exe -- -help
+```
+
+<Info>
+The static file server demonstrates httpz's capabilities including:
+- Zero-copy bigstring I/O
+- Range request support
+- ETag-based caching
+- Concurrent connection handling (up to 10,000 connections)
+</Info>
+
+## Troubleshooting
+
+### Unboxed Type Errors
+
+If you see errors about unboxed types not being recognized:
+
+```
+Error: Unbound type constructor int16#
+```
+
+**Solution**: Ensure you're using the OxCaml compiler, not standard OCaml:
+
+```bash
+which ocaml
+ocaml --version  # Should mention OxCaml or show 5.2+ with unboxed support
+```
+
+### Missing Dependencies
+
+If build fails with missing libraries:
+
+```bash
+# Install all dependencies
+opam install base base_bigstring async async_unix core core_unix
+```
+
+### Dune Version Too Old
+
+If you see dune compatibility errors:
+
+```bash
+opam install 'dune>=3.20'
+```
+
+## Next Steps
+
+<Card title="Quick Start" icon="rocket" href="/quickstart">
+  Learn how to parse HTTP requests with zero allocations
+</Card>
